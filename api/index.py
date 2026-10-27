@@ -30,6 +30,31 @@ def init_db():
     c.execute("""CREATE TABLE IF NOT EXISTS comments (
         id INTEGER PRIMARY KEY, item_id INTEGER, shop_id INTEGER, message TEXT, created_at TEXT
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS shops (
+        id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT
+    )""")
+    
+    # 店舗マスター初期データ（空の場合に投入）
+    c.execute("SELECT count(*) FROM shops")
+    if c.fetchone()[0] == 0:
+        default_shops = [
+            (1, '愛知県', '名古屋市', '名古屋中支部', '栄班', '中日新聞 栄専売店'),
+            (2, '愛知県', '名古屋市', '名古屋北支部', '名北班', '中日新聞 名北専売店'),
+            (3, '愛知県', '尾張地区', '一宮支部', '一宮班', '中日新聞 一宮専売店'),
+            (4, '岐阜県', '岐阜地区', '岐阜南支部', '岐阜南班', '中日新聞 岐阜南専売店'),
+            (5, '三重県', '三重地区', '津支部', '津班', '中日新聞 津専売店')
+        ]
+        c.executemany("INSERT INTO shops VALUES (?, ?, ?, ?, ?, ?)", default_shops)
+        
+    # デモ用初期出品データ（空の場合に投入）
+    c.execute("SELECT count(*) FROM items")
+    if c.fetchone()[0] == 0:
+        default_items = [
+            (1, 4, 'バイク', 'スーパーカブ50 プロ（大型前カゴ・リアBOX付）', 85000, '出品中', '走行距離 24,000km。エンジン良好、定期オイル交換済み。タイヤ溝十分あります。', '2026-10-25 10:00', '', 'ホンダ', '未使用に近い', '送料込み', '直接引き取り', '岐阜県', '1〜2日で発送', 3),
+            (2, 5, '部品', 'プレスカブ用 レッグシールド＆フロントキャリア純正品', 12000, '出品中', '予備で保管していた純正新品パーツです。割れや目立つ傷はありません。', '2026-10-26 14:30', '', 'ホンダ', '新品', '送料込み', '陸送・宅配便', '三重県', '2〜3日で発送', 5)
+        ]
+        c.executemany("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", default_items)
+
     conn.commit()
     conn.close()
 
@@ -948,7 +973,7 @@ def render_admin():
     return render_page(content, active_tab="admin")
 
 # --- G. CSVダウンロード処理 ---
-def download_csv(handler):
+def download_csv(handler_obj):
     conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name, buyer.name, deals.deal_price, deals.fee_amount 
@@ -965,16 +990,16 @@ def download_csv(handler):
         writer.writerow([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[5]-d[6]])
         
     csv_data = output.getvalue().encode('shift_jis', errors='replace')
-    handler.send_response(200)
-    handler.send_header('Content-Type', 'text/csv; charset=Shift_JIS')
-    handler.send_header('Content-Disposition', f'attachment; filename="deride_deals_{datetime.now().strftime("%Y%m%d")}.csv"')
-    handler.end_headers()
-    handler.wfile.write(csv_data)
+    handler_obj.send_response(200)
+    handler_obj.send_header('Content-Type', 'text/csv; charset=Shift_JIS')
+    handler_obj.send_header('Content-Disposition', f'attachment; filename="deride_deals_{datetime.now().strftime("%Y%m%d")}.csv"')
+    handler_obj.end_headers()
+    handler_obj.wfile.write(csv_data)
 
 # ==========================================
-# 4. 通信リクエスト処理（バナー画像の安全な配信対応）
+# 4. 通信リクエスト処理（Vercelサーバーレス完全対応）
 # ==========================================
-class Handler(http.server.BaseHTTPRequestHandler):
+class handler(http.server.BaseHTTPRequestHandler):
     def send_html(self, html):
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
@@ -997,18 +1022,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
-        # バナー画像ファイルの配信（ローカル / Vercel 両対応）
+        # バナー画像ファイルの配信（カレント / apiフォルダ内 / 親フォルダを自動探索）
         if path == '/banner.jpg':
-            target_path = 'banner.jpg' if os.path.exists('banner.jpg') else os.path.join(os.path.dirname(__file__), 'banner.jpg')
-            if os.path.exists(target_path):
-                try:
-                    with open(target_path, 'rb') as f:
-                        self.send_response(200)
-                        self.send_header('Content-type', 'image/jpeg')
-                        self.end_headers()
-                        self.wfile.write(f.read())
-                    return
-                except: pass
+            candidates = [
+                'banner.jpg',
+                os.path.join(os.path.dirname(__file__), 'banner.jpg'),
+                os.path.join(os.path.dirname(__file__), '..', 'banner.jpg')
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    try:
+                        with open(p, 'rb') as f:
+                            self.send_response(200)
+                            self.send_header('Content-type', 'image/jpeg')
+                            self.end_headers()
+                            self.wfile.write(f.read())
+                        return
+                    except: pass
             self.send_error(404)
             return
 
@@ -1016,7 +1046,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/sw.js': self.send_raw('application/javascript; charset=utf-8', SW_JS)
         elif path == '/app-icon.svg': self.send_raw('image/svg+xml; charset=utf-8', APP_ICON_SVG)
             
-        elif path == '/': self.send_html(render_home())
+        elif path in ('', '/', '/index.html'): self.send_html(render_home())
         elif path == '/likes': self.send_html(render_likes())
         elif path == '/sell': self.send_html(render_sell())
         elif path == '/mypage': 
@@ -1029,10 +1059,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_html(render_detail(path.split('/')[-1]))
         elif path == '/admin/deals': self.send_html(render_admin())
         elif path == '/admin/deals/download': download_csv(self)
-        else: self.send_error(404)
+        else: self.send_html(render_home())
 
     def do_POST(self):
-        length = int(self.headers['Content-Length'])
+        length = int(self.headers.get('Content-Length', 0))
         data = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8'))
         conn = sqlite3.connect('platform.db')
         c = conn.cursor()
@@ -1096,12 +1126,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         conn.close()
 
-# ==========================================
-# 5. サーバー起動
-# ==========================================
+# Vercel・ローカル兼用の設定
+Handler = handler
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", port), Handler) as httpd:
-        print(f"★ サーバー起動中！ [でらいど] PORT: {port}")
+    with socketserver.TCPServer(("0.0.0.0", port), handler) as httpd:
+        print(f"★ 起動中 PORT: {port}")
         httpd.serve_forever()
