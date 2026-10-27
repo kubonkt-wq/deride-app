@@ -9,19 +9,10 @@ import os
 from datetime import datetime
 
 # ==========================================
-# 0. Vercel対応 データベース保存先設定
-# Vercelでは '/tmp' フォルダのみ書き込みが許可されています
-# ==========================================
-if os.environ.get('VERCEL'):
-    DB_PATH = '/tmp/platform.db'
-else:
-    DB_PATH = 'platform.db'
-
-# ==========================================
 # 1. データベースの準備
 # ==========================================
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS items (
         id INTEGER PRIMARY KEY, shop_id INTEGER, category TEXT, title TEXT, price INTEGER, 
@@ -248,9 +239,9 @@ def build_item_cards(items):
         """
     return items_html
 
-# --- A. ホーム画面 ---
+# --- A. ホーム画面（バナー画像を上部に配置） ---
 def render_home():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""
         SELECT i.id, i.shop_id, i.category, i.title, i.price, i.status, i.description, i.created_at, i.image_data, 
@@ -291,7 +282,7 @@ def render_home():
 
 # --- B. いいね画面 ---
 def render_likes():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""
         SELECT i.id, i.shop_id, i.category, i.title, i.price, i.status, i.description, i.created_at, i.image_data, 
@@ -331,7 +322,7 @@ def render_likes():
 
 # --- C. 出品・編集画面 ---
 def render_sell(edit_item_id=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("SELECT id, pref, district, branch, group_name, name FROM shops ORDER BY pref, district, branch, group_name, name")
     raw_shops = c.fetchall()
@@ -621,7 +612,7 @@ def render_sell(edit_item_id=None):
 
 # --- D. 商品詳細画面 ---
 def render_detail(item_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""
         SELECT i.id, i.shop_id, i.category, i.title, i.price, i.status, i.description, i.created_at, i.image_data, 
@@ -802,7 +793,7 @@ def render_detail(item_id):
 
 # --- E. マイページ画面 ---
 def render_mypage(selected_shop_id=None):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("SELECT id, pref, branch, name FROM shops ORDER BY pref, branch, name")
     all_shops = c.fetchall()
@@ -916,7 +907,7 @@ def render_mypage(selected_shop_id=None):
 
 # --- F. 管理者画面 ---
 def render_admin():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name, buyer.name, deals.deal_price, deals.fee_amount 
                  FROM deals JOIN items ON deals.item_id = items.id 
@@ -983,7 +974,7 @@ def render_admin():
 
 # --- G. CSVダウンロード処理 ---
 def download_csv(handler_obj):
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect('platform.db')
     c = conn.cursor()
     c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name, buyer.name, deals.deal_price, deals.fee_amount 
                  FROM deals JOIN items ON deals.item_id = items.id 
@@ -1031,7 +1022,7 @@ class handler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
-        # バナー画像ファイルの配信（カレント / apiフォルダ内 / 親フォルダを自動探索）[cite: 1]
+        # バナー画像ファイルの配信（カレント / apiフォルダ内 / 親フォルダを自動探索）
         if path == '/banner.jpg':
             candidates = [
                 'banner.jpg',
@@ -1073,7 +1064,7 @@ class handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
         data = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8'))
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect('platform.db')
         c = conn.cursor()
 
         if self.path == '/items/create':
@@ -1135,6 +1126,7 @@ class handler(http.server.BaseHTTPRequestHandler):
 
         conn.close()
 
+# Vercel・ローカル兼用の設定
 Handler = handler
 
 if __name__ == '__main__':
