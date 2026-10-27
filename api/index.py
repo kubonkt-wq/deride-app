@@ -21,7 +21,7 @@ def get_db():
     return conn
 
 # ==========================================
-# 1. CSV店舗マスター読み込みと初期化（復活バグ完全防止版）
+# 1. CSV店舗マスター読み込みと初期化（デモ出品の完全撤廃）
 # ==========================================
 def load_shops_from_csv():
     shops = []
@@ -86,25 +86,13 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS shops (
             id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT
         )""")
-        c.execute("""CREATE TABLE IF NOT EXISTS system_flags (
-            key TEXT PRIMARY KEY, val TEXT
-        )""")
         
-        # 店舗マスター更新（常に最新CSVを同期）
+        # 店舗マスター更新（CSVから同期）
         c.execute("DELETE FROM shops")
         shop_data = load_shops_from_csv()
         c.executemany("INSERT OR REPLACE INTO shops VALUES (?, ?, ?, ?, ?, ?)", shop_data)
-            
-        # 初回起動フラグをチェック（削除後に復活させないための制御）
-        c.execute("SELECT count(*) FROM system_flags WHERE key='seeded'")
-        if c.fetchone()[0] == 0:
-            first_shop_id = shop_data[0][0] if shop_data else 1
-            default_items = [
-                (1, first_shop_id, 'バイク', 'スーパーカブ50 プロ（大型前カゴ・リアBOX付）', 85000, '出品中', '走行距離 24,000km。エンジン良好、定期オイル交換済み。タイヤ溝十分あります。', '2026-10-25 10:00', '', 'ホンダ', '未使用に近い', '送料込み', '直接引き取り', '愛知県', '1〜2日で発送', 3),
-                (2, first_shop_id, '部品', 'プレスカブ用 レッグシールド＆フロントキャリア純正品', 12000, '出品中', '予備で保管していた純正新品パーツです。割れや目立つ傷はありません。', '2026-10-26 14:30', '', 'ホンダ', '新品', '送料込み', '陸送・宅配便', '愛知県', '2〜3日で発送', 5)
-            ]
-            c.executemany("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", default_items)
-            c.execute("INSERT INTO system_flags VALUES ('seeded', 'true')")
+        
+        # ※デモ出品の自動投入処理は完全に削除しました（ユーザーが出品したデータのみが表示されます）
 
         conn.commit()
         conn.close()
@@ -116,11 +104,11 @@ init_db()
 # ==========================================
 # 2. PWA設定データ
 # ==========================================
-APP_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%231e40af'/><text x='50%' y='48%' font-size='42' text-anchor='middle' dominant-baseline='central'>🏍️</text><text x='50%' y='80%' font-size='15' font-weight='bold' fill='white' text-anchor='middle'>でらいど</text></svg>"""
+APP_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%231e40af'/><text x='50%' y='48%' font-size='42' text-anchor='middle' dominant-baseline='central'>🏍️</text><text x='50%' y='80%' font-size='15' font-weight='bold' fill='white' text-anchor='middle'>公式 でらイド</text></svg>"""
 
 MANIFEST_DATA = json.dumps({
-    "name": "中日新聞 バイクマーケット でらいど",
-    "short_name": "でらいど",
+    "name": "中日新聞 バイクマーケット 公式 でらイド",
+    "short_name": "公式 でらイド",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#1e40af",
@@ -138,7 +126,7 @@ BASE_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>でらいど - 中日新聞専売店 バイクマーケット</title>
+  <title>公式 でらイド - 中日新聞専売店 バイクマーケット</title>
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/app-icon.svg">
   <link rel="icon" type="image/svg+xml" href="/app-icon.svg">
@@ -150,7 +138,7 @@ BASE_HTML = """<!DOCTYPE html>
     <div class="max-w-4xl mx-auto px-4 py-2.5 flex justify-between items-center">
       <a href="/?mode=__MODE__" class="font-bold text-base md:text-lg tracking-wide flex items-center gap-1.5">
         <span class="bg-yellow-400 text-blue-900 text-[10px] px-1.5 py-0.5 rounded font-black">公式</span>
-        <span>でらいど</span>
+        <span>でらイド</span>
       </a>
       <div class="flex items-center gap-2">
         <div class="bg-blue-950 p-0.5 rounded-lg border border-blue-700 flex text-xs">
@@ -191,6 +179,7 @@ def render_page(content, active_tab="home", mode="buyer"):
     html = html.replace("__SELLER_MODE_CLS__", seller_btn_cls)
     return html
 
+# ズレ防止対応の商品カード生成
 def build_item_cards(items, mode="buyer"):
     items_html = ""
     for item in items:
@@ -210,15 +199,16 @@ def build_item_cards(items, mode="buyer"):
                 img_src = raw_img
         
         status_badge = '<div class="absolute inset-0 bg-black/50 flex items-center justify-center"><span class="bg-red-600 text-white font-bold text-sm px-3 py-1 rounded">成約済み</span></div>' if item['status'] == "成約済み" else ""
-        shop_display_name = item['name'] if item['status'] == "成約済み" else "🔒 出品店（成約後に開示）"
+        shop_display_name = item['name'] if item['status'] == "成約済み" else "🔒 出品店（成約後開示）"
         likes_val = item['likes_count'] or 0
         likes_display = f'<span class="text-xs text-pink-600 font-semibold flex items-center gap-0.5">❤️ {likes_val}</span>' if likes_val > 0 else ""
-        btn_label = "詳細・購入へ" if mode == "buyer" else "確認・管理"
+        
+        btn_label = "購入へ" if mode == "buyer" else "確認・管理"
         btn_bg = "bg-emerald-600 hover:bg-emerald-700" if mode == "buyer" else "bg-blue-600 hover:bg-blue-700"
 
         items_html += f"""
         <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col justify-between hover:shadow-md transition">
-          <div class="w-full h-44 bg-gray-100 flex items-center justify-center overflow-hidden relative">
+          <div class="w-full h-40 bg-gray-100 flex items-center justify-center overflow-hidden relative">
             <img src="{img_src}" alt="{item['title']}" class="w-full h-full object-cover">
             {img_count_badge}
             {status_badge}
@@ -226,17 +216,24 @@ def build_item_cards(items, mode="buyer"):
           <div class="p-3 flex-1 flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between mb-1">
-                <span class="text-xs px-2 py-0.5 rounded font-semibold {color}">{item['category']}</span>
-                <span class="text-xs text-gray-400">{str(item['created_at'])[:10]}</span>
+                <span class="text-[11px] px-2 py-0.5 rounded font-semibold {color}">{item['category']}</span>
+                <span class="text-[11px] text-gray-400">{str(item['created_at'])[:10]}</span>
               </div>
-              <h3 class="font-bold text-gray-900 text-sm md:text-base line-clamp-1">{item['title']}</h3>
-              <p class="text-xs text-gray-500 mt-0.5">{item['pref']} {item['branch']}<br><span class="font-semibold text-gray-700">{shop_display_name}</span></p>
+              <h3 class="font-bold text-gray-900 text-sm line-clamp-1 h-5">{item['title']}</h3>
+              <p class="text-xs text-gray-500 mt-1 line-clamp-1">{item['pref']} {item['branch']}</p>
+              <p class="text-xs font-semibold text-gray-700 line-clamp-1">{shop_display_name}</p>
             </div>
-            <div class="mt-3 pt-2 border-t flex items-center justify-between">
-              <div><span class="text-lg font-black text-red-600">¥{item['price']:,}</span></div>
-              <div class="flex items-center gap-2">
+            
+            <!-- ボトム情報（金額・ボタンの縦揃えズレ防止レイアウト） -->
+            <div class="mt-3 pt-2 border-t flex items-center justify-between min-h-[38px]">
+              <div class="flex-1 mr-1">
+                <span class="text-base font-black text-red-600 truncate block">¥{item['price']:,}</span>
+              </div>
+              <div class="flex items-center gap-1.5 flex-shrink-0">
                 {likes_display}
-                <a href="/items/{item['id']}?mode={mode}" class="{btn_bg} text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow-sm active:scale-95 transition">{btn_label}</a>
+                <a href="/items/{item['id']}?mode={mode}" class="{btn_bg} text-white text-xs font-bold px-2.5 py-1.5 rounded-lg shadow-sm active:scale-95 transition text-center whitespace-nowrap block">
+                  {btn_label}
+                </a>
               </div>
             </div>
           </div>
@@ -256,7 +253,7 @@ def render_home(mode="buyer"):
     items = c.fetchall()
     conn.close()
 
-    items_html = build_item_cards(items, mode=mode) or '<div class="col-span-full text-center py-16 bg-white rounded-xl border border-dashed border-gray-300 text-gray-400"><p class="text-sm font-bold">出品中の車両・部品はまだありません。</p></div>'
+    items_html = build_item_cards(items, mode=mode) or '<div class="col-span-full text-center py-16 bg-white rounded-xl border border-dashed border-gray-300 text-gray-400"><p class="text-sm font-bold">出品中の車両・部品はありません。</p></div>'
 
     if mode == "seller":
         action_btn = '<a href="/sell?mode=seller" class="bg-blue-600 text-white font-bold text-xs px-3.5 py-1.5 rounded-xl shadow hover:bg-blue-700 transition flex items-center gap-1"><span>📷</span> 出品する</a>'
@@ -267,7 +264,7 @@ def render_home(mode="buyer"):
 
     content = f"""
     <div class="rounded-2xl overflow-hidden shadow-md mb-4 border border-blue-200 bg-blue-50">
-      <img src="/banner.jpg" alt="でらいど 新聞販売店専用アプリ" class="w-full h-auto object-cover block">
+      <img src="/banner.jpg" alt="公式 でらイド 新聞販売店専用アプリ" class="w-full h-auto object-cover block">
     </div>
     <div class="flex items-center justify-between mb-3 bg-white p-3 rounded-xl border shadow-sm">
       <div class="flex items-center gap-2">
@@ -309,7 +306,7 @@ def render_sell(edit_item_id=None, mode="seller"):
 
     is_edit = item_to_edit is not None
     form_action = f"/items/update?mode={mode}" if is_edit else f"/items/create?mode={mode}"
-    page_title = "✏️ 出品情報を編集する" if is_edit else "📷 でらいど に出品する"
+    page_title = "✏️ 出品情報を編集する" if is_edit else "📷 でらイド に出品する"
 
     item_id_val = item_to_edit['id'] if is_edit else ""
     title_val = item_to_edit['title'] if is_edit else ""
@@ -392,7 +389,7 @@ def render_sell(edit_item_id=None, mode="seller"):
         </div>
 
         <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl text-sm shadow-md transition active:scale-95">
-          {"更新内容を保存する" if is_edit else "でらいどに出品登録する"}
+          {"更新内容を保存する" if is_edit else "でらイドに出品登録する"}
         </button>
       </form>
     </div>
@@ -501,7 +498,7 @@ def render_detail(item_id, mode="buyer"):
     likes_count = item['likes_count'] or 0
     is_closed = item['status'] == "成約済み"
 
-    seller_name_display = item['name'] if is_closed else "🔒 出品店（成約後に開示）"
+    seller_name_display = item['name'] if is_closed else "🔒 出品店（成約後開示）"
     buyer_options = "".join([f'<option value="{s["id"]}">[{s["pref"]} {s["branch"]}] {s["name"]}</option>' for s in all_shops if s["id"] != item["shop_id"]])
     commenter_options = "".join([f'<option value="{s["id"]}">[{s["pref"]} {s["branch"]}] {s["name"]}</option>' for s in all_shops])
 
@@ -703,7 +700,7 @@ def render_mypage(selected_shop_id=None, mode="buyer"):
     content = f"""
     <div class="space-y-5">
       <div class="bg-white rounded-2xl p-4 shadow-sm border space-y-3">
-        <h1 class="font-black text-base text-gray-900 flex items-center gap-2"><span>👤</span> でらいど 店舗マイページ</h1>
+        <h1 class="font-black text-base text-gray-900 flex items-center gap-2"><span>👤</span> 公式 でらイド 店舗マイページ</h1>
         <form action="/mypage" method="get" class="flex gap-2">
           <input type="hidden" name="mode" value="{mode}">
           <select name="shop_id" class="flex-1 border rounded-xl p-2.5 text-xs bg-gray-50 font-bold" onchange="this.form.submit()">
@@ -758,7 +755,7 @@ def render_admin(mode="buyer"):
       </div>
       <div class="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
         <div class="bg-blue-900 p-4 text-white flex justify-between items-center">
-          <div><h1 class="font-black text-base flex items-center gap-1.5">⚙️ でらいど 成約明細台帳</h1><p class="text-[11px] text-blue-200">成約件数: {len(deals)}件 / 手数料率: 10%</p></div>
+          <div><h1 class="font-black text-base flex items-center gap-1.5">⚙️ 公式 でらイド 成約明細台帳</h1><p class="text-[11px] text-blue-200">成約件数: {len(deals)}件 / 手数料率: 10%</p></div>
           <div class="text-right"><span class="text-[10px] text-blue-200 block">累計手数料</span><span class="text-xl font-black text-yellow-300">¥{total_fee:,}</span></div>
         </div>
         <div class="overflow-x-auto">
@@ -788,7 +785,7 @@ def download_csv(handler_obj):
 
     output = io.StringIO()
     writer = csv.writer(output, lineterminator='\n')
-    writer.writerow(['取引ID', '成約日時', '商品名', '出品店舗(売手)', '購入店舗(買手)', '決済額(成約価格)', 'でらいど手数料(10%)', '出品者受取額'])
+    writer.writerow(['取引ID', '成約日時', '商品名', '出品店舗(売手)', '購入店舗(買手)', '決済額(成約価格)', 'でらイド手数料(10%)', '出品者受取額'])
     for d in deals:
         writer.writerow([d['id'], d['closed_at'], d['title'], d['s_name'], d['b_name'], d['deal_price'], d['fee_amount'], d['deal_price'] - d['fee_amount']])
         
