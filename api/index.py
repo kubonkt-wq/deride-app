@@ -21,11 +21,10 @@ def get_db():
     return conn
 
 # ==========================================
-# 1. CSV店舗マスターの自動読み込みとDB初期化
+# 1. CSV店舗マスター読み込みと初期化（復活バグ完全防止版）
 # ==========================================
 def load_shops_from_csv():
     shops = []
-    # 探索先パス（ルート階層、apiフォルダ内、親階層）
     csv_paths = [
         'shops.csv',
         os.path.join(os.path.dirname(__file__), 'shops.csv'),
@@ -45,7 +44,6 @@ def load_shops_from_csv():
                     header = next(reader, None)
                     for idx, row in enumerate(reader, 1):
                         if not row or len(row) < 2: continue
-                        # 列数が不足していても補完する処理
                         s_id = row[0].strip() if len(row) > 0 and row[0].strip().isdigit() else idx
                         pref = row[1].strip() if len(row) > 1 else "愛知県"
                         district = row[2].strip() if len(row) > 2 else ""
@@ -58,7 +56,6 @@ def load_shops_from_csv():
             except Exception:
                 continue
 
-    # CSVがない場合の予備データ
     if not shops:
         shops = [
             (1, '愛知県', '名古屋市', '名古屋中支部', '栄班', '中日新聞 栄専売店'),
@@ -89,14 +86,17 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS shops (
             id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT
         )""")
+        c.execute("""CREATE TABLE IF NOT EXISTS system_flags (
+            key TEXT PRIMARY KEY, val TEXT
+        )""")
         
-        # 店舗マスター更新（CSVから常に最新データを同期）
+        # 店舗マスター更新（常に最新CSVを同期）
         c.execute("DELETE FROM shops")
         shop_data = load_shops_from_csv()
         c.executemany("INSERT OR REPLACE INTO shops VALUES (?, ?, ?, ?, ?, ?)", shop_data)
             
-        # デモ用初期出品データ
-        c.execute("SELECT count(*) FROM items")
+        # 初回起動フラグをチェック（削除後に復活させないための制御）
+        c.execute("SELECT count(*) FROM system_flags WHERE key='seeded'")
         if c.fetchone()[0] == 0:
             first_shop_id = shop_data[0][0] if shop_data else 1
             default_items = [
@@ -104,6 +104,7 @@ def init_db():
                 (2, first_shop_id, '部品', 'プレスカブ用 レッグシールド＆フロントキャリア純正品', 12000, '出品中', '予備で保管していた純正新品パーツです。割れや目立つ傷はありません。', '2026-10-26 14:30', '', 'ホンダ', '新品', '送料込み', '陸送・宅配便', '愛知県', '2〜3日で発送', 5)
             ]
             c.executemany("INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", default_items)
+            c.execute("INSERT INTO system_flags VALUES ('seeded', 'true')")
 
         conn.commit()
         conn.close()
@@ -245,7 +246,6 @@ def build_item_cards(items, mode="buyer"):
 
 # --- A. ホーム画面 ---
 def render_home(mode="buyer"):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("""
@@ -282,7 +282,6 @@ def render_home(mode="buyer"):
 
 # --- B. いいね画面 ---
 def render_likes(mode="buyer"):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("""SELECT i.*, s.name, s.pref, s.branch FROM items i JOIN shops s ON i.shop_id = s.id WHERE COALESCE(i.likes_count, 0) > 0 ORDER BY i.likes_count DESC, i.id DESC""")
@@ -293,9 +292,8 @@ def render_likes(mode="buyer"):
     content = f'<div class="mb-4"><h2 class="text-base font-bold text-gray-900 flex items-center gap-1.5"><span class="text-pink-600 text-lg">❤️</span><span>いいね！された人気商品</span><span class="text-xs font-normal text-gray-500">({len(items)}件)</span></h2></div><div class="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">{items_html}</div>'
     return render_page(content, active_tab="likes", mode=mode)
 
-# --- C. 出品画面（CSV店舗マスターツリー対応） ---
+# --- C. 出品画面 ---
 def render_sell(edit_item_id=None, mode="seller"):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id, pref, district, branch, group_name, name FROM shops ORDER BY pref, district, branch, group_name, name")
@@ -481,7 +479,6 @@ def render_sell(edit_item_id=None, mode="seller"):
 
 # --- D. 商品詳細画面 ---
 def render_detail(item_id, mode="buyer"):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("""
@@ -640,7 +637,6 @@ def render_detail(item_id, mode="buyer"):
 
 # --- E. マイページ ---
 def render_mypage(selected_shop_id=None, mode="buyer"):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT id, pref, branch, name FROM shops ORDER BY pref, branch, name")
@@ -727,7 +723,6 @@ def render_mypage(selected_shop_id=None, mode="buyer"):
 
 # --- F. 管理者画面 ---
 def render_admin(mode="buyer"):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
@@ -782,7 +777,6 @@ def render_admin(mode="buyer"):
 
 # --- G. CSVダウンロード ---
 def download_csv(handler_obj):
-    init_db()
     conn = get_db()
     c = conn.cursor()
     c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
@@ -879,7 +873,6 @@ class handler(http.server.BaseHTTPRequestHandler):
 
             length = int(self.headers.get('Content-Length', 0))
             data = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8'))
-            init_db()
             conn = get_db()
             c = conn.cursor()
 
