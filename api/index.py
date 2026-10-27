@@ -21,7 +21,7 @@ def get_db():
     return conn
 
 # ==========================================
-# 1. CSV店舗マスター読み込みと初期化（デモ出品の完全撤廃）
+# 1. CSV店舗マスター読み込みと初期化
 # ==========================================
 def load_shops_from_csv():
     shops = []
@@ -87,13 +87,10 @@ def init_db():
             id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT
         )""")
         
-        # 店舗マスター更新（CSVから同期）
         c.execute("DELETE FROM shops")
         shop_data = load_shops_from_csv()
         c.executemany("INSERT OR REPLACE INTO shops VALUES (?, ?, ?, ?, ?, ?)", shop_data)
         
-        # ※デモ出品の自動投入処理は完全に削除しました（ユーザーが出品したデータのみが表示されます）
-
         conn.commit()
         conn.close()
     except Exception as e:
@@ -179,7 +176,6 @@ def render_page(content, active_tab="home", mode="buyer"):
     html = html.replace("__SELLER_MODE_CLS__", seller_btn_cls)
     return html
 
-# ズレ防止対応の商品カード生成
 def build_item_cards(items, mode="buyer"):
     items_html = ""
     for item in items:
@@ -224,7 +220,6 @@ def build_item_cards(items, mode="buyer"):
               <p class="text-xs font-semibold text-gray-700 line-clamp-1">{shop_display_name}</p>
             </div>
             
-            <!-- ボトム情報（金額・ボタンの縦揃えズレ防止レイアウト） -->
             <div class="mt-3 pt-2 border-t flex items-center justify-between min-h-[38px]">
               <div class="flex-1 mr-1">
                 <span class="text-base font-black text-red-600 truncate block">¥{item['price']:,}</span>
@@ -474,7 +469,7 @@ def render_sell(edit_item_id=None, mode="seller"):
     content = template.replace("__SHOPS_JSON__", shops_json)
     return render_page(content, active_tab="sell", mode=mode)
 
-# --- D. 商品詳細画面 ---
+# --- D. 商品詳細画面（購入者の自店舗選択もツリー階層化） ---
 def render_detail(item_id, mode="buyer"):
     conn = get_db()
     c = conn.cursor()
@@ -488,8 +483,12 @@ def render_detail(item_id, mode="buyer"):
     c.execute("SELECT comments.message, comments.created_at, shops.name FROM comments JOIN shops ON comments.shop_id = shops.id WHERE comments.item_id=? ORDER BY comments.id ASC", (item_id,))
     comments = c.fetchall()
     
-    c.execute("SELECT id, pref, branch, name FROM shops ORDER BY pref, branch, name")
-    all_shops = c.fetchall()
+    c.execute("SELECT id, pref, district, branch, group_name, name FROM shops ORDER BY pref, district, branch, group_name, name")
+    raw_shops = c.fetchall()
+    shops_data = [{"id": r['id'], "p": r['pref'] or "", "d": r['district'] or "", "b": r['branch'] or "", "g": r['group_name'] or "", "n": r['name'] or ""} for r in raw_shops]
+    shops_json = json.dumps(shops_data, ensure_ascii=False)
+    
+    commenter_options = "".join([f'<option value="{s["id"]}">[{s["pref"]} {s["branch"]}] {s["name"]}</option>' for s in raw_shops])
     conn.close()
 
     if not item: return render_page("<p class='p-8 text-center'>商品が見つかりません。<br><a href='/' class='text-blue-600 font-bold underline mt-2 inline-block'>トップに戻る</a></p>", active_tab="home", mode=mode)
@@ -499,8 +498,6 @@ def render_detail(item_id, mode="buyer"):
     is_closed = item['status'] == "成約済み"
 
     seller_name_display = item['name'] if is_closed else "🔒 出品店（成約後開示）"
-    buyer_options = "".join([f'<option value="{s["id"]}">[{s["pref"]} {s["branch"]}] {s["name"]}</option>' for s in all_shops if s["id"] != item["shop_id"]])
-    commenter_options = "".join([f'<option value="{s["id"]}">[{s["pref"]} {s["branch"]}] {s["name"]}</option>' for s in all_shops])
 
     raw_img = item['image_data']
     images = []
@@ -541,20 +538,52 @@ def render_detail(item_id, mode="buyer"):
           <p class="text-gray-800 whitespace-pre-wrap">{com['message']}</p>
         </div>"""
 
+    # 購入者モード時の購入フォーム（出品時と同じ所属ツリーで自店舗を選択）
     buyer_purchase_area = ""
     if mode == "buyer":
         if not is_closed:
             buyer_purchase_area = f"""
-            <div class="bg-emerald-50 border border-emerald-300 rounded-xl p-4 space-y-2 mt-4 shadow-sm">
-              <h4 class="font-bold text-sm text-emerald-950 flex items-center gap-1.5"><span>🛒</span> この車両・部品を購入する</h4>
-              <p class="text-xs text-emerald-700">自店舗を選択して購入を確定してください。成約後に出品店舗の詳細情報が開示されます。</p>
-              <form action="/deals/close?mode={mode}" method="post" class="space-y-2 pt-1">
+            <div class="bg-emerald-50 border border-emerald-300 rounded-xl p-4 space-y-3 mt-4 shadow-sm">
+              <h4 class="font-bold text-sm text-emerald-950 flex items-center gap-1.5">
+                <span>🛒</span> この車両・部品を購入する
+              </h4>
+              <p class="text-xs text-emerald-700">購入するあなたの店舗を選択してください。成約後に出品店舗の詳細情報が開示されます。</p>
+              
+              <form action="/deals/close?mode={mode}" method="post" class="space-y-3 pt-1">
                 <input type="hidden" name="item_id" value="{item['id']}">
                 <input type="hidden" name="seller_shop_id" value="{item['shop_id']}">
                 <input type="hidden" name="price" value="{item['price']}">
-                <select name="buyer_shop_id" class="w-full border rounded-lg p-2.5 text-xs font-bold bg-white">{buyer_options}</select>
-                <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-lg text-sm shadow transition active:scale-95">
-                  ¥{item['price']:,} で購入・商談成立
+
+                <!-- 自店舗選択ツリー -->
+                <div class="bg-white p-3 rounded-xl border border-emerald-200 space-y-2">
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    <div>
+                      <label class="block text-[10px] text-gray-600 mb-0.5">① 県</label>
+                      <select id="buyerTreePref" class="w-full border rounded-lg p-2 text-xs bg-white"></select>
+                    </div>
+                    <div id="buyerDistrictBox">
+                      <label class="block text-[10px] text-gray-600 mb-0.5">② 地区</label>
+                      <select id="buyerTreeDistrict" class="w-full border rounded-lg p-2 text-xs bg-white"></select>
+                    </div>
+                    <div>
+                      <label class="block text-[10px] text-gray-600 mb-0.5">③ 支部</label>
+                      <select id="buyerTreeBranch" class="w-full border rounded-lg p-2 text-xs bg-white"></select>
+                    </div>
+                    <div id="buyerGroupBox">
+                      <label class="block text-[10px] text-gray-600 mb-0.5">④ 班</label>
+                      <select id="buyerTreeGroup" class="w-full border rounded-lg p-2 text-xs bg-white"></select>
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-[10px] text-gray-600 mb-0.5 font-bold">⑤ 自店舗名</label>
+                    <select id="buyerTreeShop" name="buyer_shop_id" class="w-full border rounded-lg p-2.5 text-xs font-bold bg-white text-emerald-900" required>
+                      <option value="">↑ 上の県・支部を選択してください</option>
+                    </select>
+                  </div>
+                </div>
+
+                <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-lg text-sm shadow transition active:scale-95">
+                  ¥{item['price']:,} で購入・成約確定
                 </button>
               </form>
             </div>
@@ -629,7 +658,83 @@ def render_detail(item_id, mode="buyer"):
       </div>
       {seller_admin_menu}
     </div>
+
+    <!-- 購入者用自店舗選択ツリー連動スクリプト -->
+    <script>
+      const buyerShops = __SHOPS_JSON__;
+      const currentSellerShopId = {item['shop_id']};
+      // 出品者自身の店舗は購入選択肢から除外
+      const selectableShops = buyerShops.filter(s => s.id !== currentSellerShopId);
+
+      const bPrefEl = document.getElementById('buyerTreePref');
+      const bDistEl = document.getElementById('buyerTreeDistrict');
+      const bDistBox = document.getElementById('buyerDistrictBox');
+      const bBranchEl = document.getElementById('buyerTreeBranch');
+      const bGroupEl = document.getElementById('buyerTreeGroup');
+      const bGroupBox = document.getElementById('buyerGroupBox');
+      const bShopEl = document.getElementById('buyerTreeShop');
+
+      if (bPrefEl) {{
+        const bPrefs = [...new Set(selectableShops.map(s => s.p).filter(Boolean))];
+        bPrefEl.innerHTML = '<option value="">県を選択</option>' + bPrefs.map(p => '<option value="' + p + '">' + p + '</option>').join('');
+
+        bPrefEl.addEventListener('change', () => {{
+          const selPref = bPrefEl.value;
+          bDistEl.innerHTML = '<option value="">地区を選択</option>';
+          bBranchEl.innerHTML = '<option value="">支部を選択</option>';
+          bGroupEl.innerHTML = '<option value="">班を選択</option>';
+          bShopEl.innerHTML = '<option value="">店舗を選択</option>';
+          if (!selPref) return;
+
+          const filtered = selectableShops.filter(s => s.p === selPref);
+          const dists = [...new Set(filtered.map(s => s.d).filter(Boolean))];
+          if (dists.length === 0) {{
+            bDistBox.classList.add('hidden');
+            loadBuyerBranches(selPref, "");
+          }} else {{
+            bDistBox.classList.remove('hidden');
+            bDistEl.innerHTML = '<option value="">地区を選択</option>' + dists.map(d => '<option value="' + d + '">' + d + '</option>').join('');
+          }}
+        }});
+
+        bDistEl.addEventListener('change', () => loadBuyerBranches(bPrefEl.value, bDistEl.value));
+
+        function loadBuyerBranches(pref, dist) {{
+          bBranchEl.innerHTML = '<option value="">支部を選択</option>';
+          bGroupEl.innerHTML = '<option value="">班を選択</option>';
+          bShopEl.innerHTML = '<option value="">店舗を選択</option>';
+          const filtered = selectableShops.filter(s => s.p === pref && (!dist || s.d === dist));
+          const branches = [...new Set(filtered.map(s => s.b).filter(Boolean))];
+          bBranchEl.innerHTML = '<option value="">支部を選択</option>' + branches.map(b => '<option value="' + b + '">' + b + '</option>').join('');
+        }}
+
+        bBranchEl.addEventListener('change', () => {{
+          const selBranch = bBranchEl.value;
+          bGroupEl.innerHTML = '<option value="">班を選択</option>';
+          bShopEl.innerHTML = '<option value="">店舗を選択</option>';
+          if (!selBranch) return;
+
+          const filtered = selectableShops.filter(s => s.p === bPrefEl.value && (!bDistEl.value || s.d === bDistEl.value) && s.b === selBranch);
+          const groups = [...new Set(filtered.map(s => s.g).filter(Boolean))];
+          if (groups.length === 0) {{
+            bGroupBox.classList.add('hidden');
+            loadBuyerShops(bPrefEl.value, bDistEl.value, selBranch, "");
+          }} else {{
+            bGroupBox.classList.remove('hidden');
+            bGroupEl.innerHTML = '<option value="">班を選択</option>' + groups.map(g => '<option value="' + g + '">' + g + '</option>').join('');
+          }}
+        }});
+
+        bGroupEl.addEventListener('change', () => loadBuyerShops(bPrefEl.value, bDistEl.value, bBranchEl.value, bGroupEl.value));
+
+        function loadBuyerShops(pref, dist, branch, group) {{
+          const filtered = selectableShops.filter(s => s.p === pref && (!dist || s.d === dist) && s.b === branch && (!group || s.g === group));
+          bShopEl.innerHTML = '<option value="">店舗を選択してください</option>' + filtered.map(s => '<option value="' + s.id + '">' + s.n + '</option>').join('');
+        }}
+      }}
+    </script>
     """
+    content = content.replace("__SHOPS_JSON__", shops_json)
     return render_page(content, active_tab="home", mode=mode)
 
 # --- E. マイページ ---
