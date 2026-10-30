@@ -735,4 +735,417 @@ def render_detail(item_id, mode="buyer"):
           <input type="hidden" name="item_id" value="{item['id']}">
           <select name="shop_id" class="w-full border rounded-lg p-2 text-xs bg-white">{commenter_options}</select>
           <textarea name="message" placeholder="質問・商談内容を入力..." class="w-full border rounded-lg p-2 text-xs h-16" required></textarea>
-          <button type="submit" class="w-full bg-
+          <button type="submit" class="w-full bg-blue-600 text-white font-bold py-2 rounded-lg text-xs hover:bg-blue-700 shadow">コメント送信</button>
+        </form>
+      </div>
+      {seller_admin_menu}
+    </div>
+
+    <!-- 購入者用自店舗選択ツリー連動スクリプト -->
+    <script>
+      const buyerShops = __SHOPS_JSON__;
+      const currentSellerShopId = {item['shop_id']};
+      const selectableShops = buyerShops.filter(s => s.id !== currentSellerShopId);
+
+      const bPrefEl = document.getElementById('buyerTreePref');
+      const bDistEl = document.getElementById('buyerTreeDistrict');
+      const bDistBox = document.getElementById('buyerDistrictBox');
+      const bBranchEl = document.getElementById('buyerTreeBranch');
+      const bGroupEl = document.getElementById('buyerTreeGroup');
+      const bGroupBox = document.getElementById('buyerGroupBox');
+      const bShopEl = document.getElementById('buyerTreeShop');
+
+      if (bPrefEl) {{
+        const bPrefs = [...new Set(selectableShops.map(s => s.p).filter(Boolean))];
+        bPrefEl.innerHTML = '<option value="">県を選択</option>' + bPrefs.map(p => '<option value="' + p + '">' + p + '</option>').join('');
+
+        bPrefEl.addEventListener('change', () => {{
+          const selPref = bPrefEl.value;
+          bDistEl.innerHTML = '<option value="">地区を選択</option>';
+          bBranchEl.innerHTML = '<option value="">支部を選択</option>';
+          bGroupEl.innerHTML = '<option value="">班を選択</option>';
+          bShopEl.innerHTML = '<option value="">店舗を選択</option>';
+          if (!selPref) return;
+
+          const filtered = selectableShops.filter(s => s.p === selPref);
+          const dists = [...new Set(filtered.map(s => s.d).filter(Boolean))];
+          if (dists.length === 0) {{
+            bDistBox.classList.add('hidden');
+            loadBuyerBranches(selPref, "");
+          }} else {{
+            bDistBox.classList.remove('hidden');
+            bDistEl.innerHTML = '<option value="">地区を選択</option>' + dists.map(d => '<option value="' + d + '">' + d + '</option>').join('');
+          }}
+        }});
+
+        bDistEl.addEventListener('change', () => loadBuyerBranches(bPrefEl.value, bDistEl.value));
+
+        function loadBuyerBranches(pref, dist) {{
+          bBranchEl.innerHTML = '<option value="">支部を選択</option>';
+          bGroupEl.innerHTML = '<option value="">班を選択</option>';
+          bShopEl.innerHTML = '<option value="">店舗を選択</option>';
+          const filtered = selectableShops.filter(s => s.p === pref && (!dist || s.d === dist));
+          const branches = [...new Set(filtered.map(s => s.b).filter(Boolean))];
+          bBranchEl.innerHTML = '<option value="">支部を選択</option>' + branches.map(b => '<option value="' + b + '">' + b + '</option>').join('');
+        }}
+
+        bBranchEl.addEventListener('change', () => {{
+          const selBranch = bBranchEl.value;
+          bGroupEl.innerHTML = '<option value="">班を選択</option>';
+          bShopEl.innerHTML = '<option value="">店舗を選択</option>';
+          if (!selBranch) return;
+
+          const filtered = selectableShops.filter(s => s.p === bPrefEl.value && (!bDistEl.value || s.d === bDistEl.value) && s.b === selBranch);
+          const groups = [...new Set(filtered.map(s => s.g).filter(Boolean))];
+          if (groups.length === 0) {{
+            bGroupBox.classList.add('hidden');
+            loadBuyerShops(bPrefEl.value, bDistEl.value, selBranch, "");
+          }} else {{
+            bGroupBox.classList.remove('hidden');
+            bGroupEl.innerHTML = '<option value="">班を選択</option>' + groups.map(g => '<option value="' + g + '">' + g + '</option>').join('');
+          }}
+        }});
+
+        bGroupEl.addEventListener('change', () => loadBuyerShops(bPrefEl.value, bDistEl.value, bBranchEl.value, bGroupEl.value));
+
+        function loadBuyerShops(pref, dist, branch, group) {{
+          const filtered = selectableShops.filter(s => s.p === pref && (!dist || s.d === dist) && s.b === branch && (!group || s.g === group));
+          bShopEl.innerHTML = '<option value="">店舗を選択してください</option>' + filtered.map(s => '<option value="' + s.id + '">' + s.n + '</option>').join('');
+        }}
+      }}
+    </script>
+    """
+    content = content.replace("__SHOPS_JSON__", shops_json)
+    return render_page(content, active_tab="home", mode=mode)
+
+# --- E. マイページ ---
+def render_mypage(selected_shop_id=None, mode="buyer"):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, pref, branch, name FROM shops ORDER BY pref, branch, name")
+    all_shops = c.fetchall()
+
+    shop_options = "".join([
+        f'<option value="{s["id"]}" {"selected" if selected_shop_id and str(selected_shop_id)==str(s["id"]) else ""}>[{s["pref"]} {s["branch"]}] {s["name"]}</option>'
+        for s in all_shops
+    ])
+
+    sell_deals_html = ""
+    buy_deals_html = ""
+
+    if selected_shop_id:
+        c.execute("""
+            SELECT d.id, d.closed_at, i.title, b.name, d.deal_price, d.fee_amount, i.id as item_id
+            FROM deals d JOIN items i ON d.item_id = i.id JOIN shops b ON d.buyer_shop_id = b.id
+            WHERE d.seller_shop_id = ? ORDER BY d.closed_at DESC
+        """, (selected_shop_id,))
+        for d in c.fetchall():
+            net = d['deal_price'] - d['fee_amount']
+            sell_deals_html += f"""
+            <div class="bg-white border rounded-xl p-3 shadow-sm flex flex-col justify-between">
+              <div class="flex justify-between items-start border-b pb-2 mb-2">
+                <div>
+                  <span class="text-[10px] text-gray-400">{str(d['closed_at'])[:10]} 成約</span>
+                  <h4 class="font-bold text-sm text-gray-900 line-clamp-1">{d['title']}</h4>
+                  <p class="text-xs text-gray-600 mt-0.5">購入店: <strong class="text-blue-900">{d['name']}</strong></p>
+                </div>
+                <a href="/items/{d['item_id']}?mode={mode}" class="text-[10px] bg-gray-100 text-gray-700 px-2 py-1 rounded hover:bg-gray-200">詳細</a>
+              </div>
+              <div class="flex justify-between text-xs items-center bg-gray-50 p-2 rounded">
+                <span class="text-gray-500">売値: ¥{d['deal_price']:,} (手数料: -¥{d['fee_amount']:,})</span>
+                <span class="font-black text-emerald-700 text-sm">手取: ¥{net:,}</span>
+              </div>
+            </div>
+            """
+
+        c.execute("""
+            SELECT d.id, d.closed_at, i.title, s.name, d.deal_price, i.id as item_id
+            FROM deals d JOIN items i ON d.item_id = i.id JOIN shops s ON d.seller_shop_id = s.id
+            WHERE d.buyer_shop_id = ? ORDER BY d.closed_at DESC
+        """, (selected_shop_id,))
+        for d in c.fetchall():
+            buy_deals_html += f"""
+            <div class="bg-white border rounded-xl p-3 shadow-sm flex flex-col justify-between">
+              <div class="flex justify-between items-start border-b pb-2 mb-2">
+                <div>
+                  <span class="text-[10px] text-gray-400">{str(d['closed_at'])[:10]} 購入</span>
+                  <h4 class="font-bold text-sm text-gray-900 line-clamp-1">{d['title']}</h4>
+                  <p class="text-xs text-gray-600 mt-0.5">出品店: <strong class="text-blue-900">{d['name']}</strong></p>
+                </div>
+                <a href="/items/{d['item_id']}?mode={mode}" class="text-[10px] bg-gray-100 text-gray-700 px-2 py-1 rounded hover:bg-gray-200">詳細</a>
+              </div>
+              <div class="flex justify-between text-xs items-center bg-gray-50 p-2 rounded">
+                <span class="text-gray-500">購入価格(税込)</span>
+                <span class="font-black text-red-600 text-sm">¥{d['deal_price']:,}</span>
+              </div>
+            </div>
+            """
+
+    conn.close()
+
+    content = f"""
+    <div class="space-y-5">
+      <div class="bg-white rounded-2xl p-4 shadow-sm border space-y-3">
+        <h1 class="font-black text-base text-gray-900 flex items-center gap-2"><span>👤</span> 公式 でらイド 店舗マイページ</h1>
+        <form action="/mypage" method="get" class="flex gap-2">
+          <input type="hidden" name="mode" value="{mode}">
+          <select name="shop_id" class="flex-1 border rounded-xl p-2.5 text-xs bg-gray-50 font-bold" onchange="this.form.submit()">
+            <option value="">▼ 店舗を選択してください</option>
+            {shop_options}
+          </select>
+          <button type="submit" class="bg-blue-600 text-white text-xs font-bold px-4 py-2.5 rounded-xl shadow">表示</button>
+        </form>
+      </div>
+      {f'''
+      <div><h3 class="font-bold text-sm text-gray-900 mb-2 flex items-center gap-1.5"><span>🛍️</span> 購入した履歴（買手）</h3><div class="space-y-2">{buy_deals_html or '<p class="text-xs text-gray-400 py-6 text-center border border-dashed rounded-xl bg-white">購入履歴はありません</p>'}</div></div>
+      <div><h3 class="font-bold text-sm text-gray-900 mb-2 flex items-center gap-1.5"><span>🎉</span> 出品して成約した履歴（売手）</h3><div class="space-y-2">{sell_deals_html or '<p class="text-xs text-gray-400 py-6 text-center border border-dashed rounded-xl bg-white">成約履歴はありません</p>'}</div></div>
+      ''' if selected_shop_id else '<div class="text-center py-12 text-xs text-gray-400 bg-white rounded-2xl border border-dashed">店舗を選択すると取引履歴が表示されます</div>'}
+    </div>
+    """
+    return render_page(content, active_tab="mypage", mode=mode)
+
+# --- F. 管理者画面 ---
+def render_admin(mode="buyer"):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
+                 FROM deals JOIN items ON deals.item_id = items.id 
+                 JOIN shops as seller ON deals.seller_shop_id = seller.id 
+                 JOIN shops as buyer ON deals.buyer_shop_id = buyer.id ORDER BY deals.closed_at DESC""")
+    deals = c.fetchall()
+    conn.close()
+    
+    total_fee = sum(d['fee_amount'] for d in deals)
+    rows = "".join([f"""<tr class="border-b text-xs hover:bg-gray-50">
+      <td class="p-3 text-gray-600">{str(d['closed_at'])[:10]}</td>
+      <td class="p-3 font-bold text-gray-800">{d['title']}</td>
+      <td class="p-3 text-gray-700">
+        <span class="text-[10px] text-blue-600 bg-blue-50 px-1 rounded border">売手</span> {d['s_name']}<br>
+        <span class="text-[10px] text-green-600 bg-green-50 px-1 rounded border mt-1 inline-block">買手</span> {d['b_name']}
+      </td>
+      <td class="p-3 text-right">¥{d['deal_price']:,}</td>
+      <td class="p-3 text-right font-bold text-red-600">¥{d['fee_amount']:,}</td>
+      <td class="p-3 text-right font-black text-emerald-700">¥{(d['deal_price'] - d['fee_amount']):,}</td>
+    </tr>""" for d in deals]) or '<tr><td colspan="6" class="text-center p-8 text-sm text-gray-400 border-b">成約履歴はまだありません</td></tr>'
+    
+    content = f"""
+    <div class="space-y-4 mb-6">
+      <div class="bg-gradient-to-r from-emerald-600 to-teal-700 rounded-2xl p-5 text-white shadow-md flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div>
+          <span class="text-xs bg-emerald-800/60 px-2 py-0.5 rounded font-bold uppercase tracking-wider">Excel連携機能</span>
+          <h2 class="text-lg font-black mt-1">成約データの一括ダウンロード</h2>
+        </div>
+        <a href="/admin/deals/download" class="w-full sm:w-auto text-center px-6 py-3.5 bg-yellow-400 hover:bg-yellow-300 text-emerald-950 font-black text-sm rounded-xl shadow-lg transition active:scale-95 flex items-center justify-center gap-2">
+          <span>📊 今すぐExcel(CSV)を出力する</span>
+        </a>
+      </div>
+      <div class="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+        <div class="bg-blue-900 p-4 text-white flex justify-between items-center">
+          <div><h1 class="font-black text-base flex items-center gap-1.5">⚙️ 公式 でらイド 成約明細台帳</h1><p class="text-[11px] text-blue-200">成約件数: {len(deals)}件 / 手数料率: 10%</p></div>
+          <div class="text-right"><span class="text-[10px] text-blue-200 block">累計手数料</span><span class="text-xl font-black text-yellow-300">¥{total_fee:,}</span></div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-left min-w-[600px]">
+            <tr class="bg-gray-100 border-b border-gray-300 text-[11px] text-gray-600 uppercase">
+              <th class="p-3 font-semibold">成約日</th><th class="p-3 font-semibold">成約商品</th><th class="p-3 font-semibold">取引店舗</th>
+              <th class="p-3 text-right font-semibold">成約価格(税込)</th><th class="p-3 text-right font-semibold">手数料(10%)</th><th class="p-3 text-right font-semibold">売手受取額</th>
+            </tr>
+            {rows}
+          </table>
+        </div>
+      </div>
+    </div>
+    """
+    return render_page(content, active_tab="admin", mode=mode)
+
+# --- G. CSVダウンロード ---
+def download_csv(handler_obj):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
+                 FROM deals JOIN items ON deals.item_id = items.id 
+                 JOIN shops as seller ON deals.seller_shop_id = seller.id 
+                 JOIN shops as buyer ON deals.buyer_shop_id = buyer.id ORDER BY deals.closed_at DESC""")
+    deals = c.fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator='\n')
+    writer.writerow(['取引ID', '成約日時', '商品名', '出品店舗(売手)', '購入店舗(買手)', '決済額(成約価格)', 'でらイド手数料(10%)', '出品者受取額'])
+    for d in deals:
+        writer.writerow([d['id'], d['closed_at'], d['title'], d['s_name'], d['b_name'], d['deal_price'], d['fee_amount'], d['deal_price'] - d['fee_amount']])
+        
+    csv_data = output.getvalue().encode('shift_jis', errors='replace')
+    handler_obj.send_response(200)
+    handler_obj.send_header('Content-Type', 'text/csv; charset=Shift_JIS')
+    handler_obj.send_header('Content-Disposition', f'attachment; filename="deride_deals_{datetime.now().strftime("%Y%m%d")}.csv"')
+    handler_obj.end_headers()
+    handler_obj.wfile.write(csv_data)
+
+# ==========================================
+# 4. 通信リクエスト処理
+# ==========================================
+class handler(http.server.BaseHTTPRequestHandler):
+    def send_html(self, html):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(html.encode('utf-8'))
+        
+    def send_raw(self, content_type, data):
+        self.send_response(200)
+        self.send_header('Content-type', content_type)
+        self.end_headers()
+        self.wfile.write(data.encode('utf-8'))
+        
+    def send_redirect(self, url):
+        self.send_response(303)
+        self.send_header('Location', url)
+        self.end_headers()
+
+    def do_GET(self):
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            query = urllib.parse.parse_qs(parsed.query)
+            mode = query.get('mode', ['buyer'])[0]
+
+            if path == '/banner.jpg':
+                candidates = ['banner.jpg', os.path.join(os.path.dirname(__file__), 'banner.jpg'), os.path.join(os.path.dirname(__file__), '..', 'banner.jpg')]
+                for p in candidates:
+                    if os.path.exists(p):
+                        try:
+                            with open(p, 'rb') as f:
+                                self.send_response(200)
+                                self.send_header('Content-type', 'image/jpeg')
+                                self.end_headers()
+                                self.wfile.write(f.read())
+                            return
+                        except: pass
+                self.send_error(404)
+                return
+
+            elif path == '/manifest.json': self.send_raw('application/manifest+json; charset=utf-8', MANIFEST_DATA)
+            elif path == '/sw.js': self.send_raw('application/javascript; charset=utf-8', SW_JS)
+            elif path == '/app-icon.svg': self.send_raw('image/svg+xml; charset=utf-8', APP_ICON_SVG)
+                
+            elif path in ('', '/', '/index.html'): self.send_html(render_home(mode=mode))
+            elif path == '/likes': self.send_html(render_likes(mode=mode))
+            elif path == '/sell': self.send_html(render_sell(mode="seller"))
+            elif path == '/mypage': 
+                shop_id = query.get('shop_id', [''])[0]
+                self.send_html(render_mypage(shop_id, mode=mode))
+            elif path.startswith('/items/') and path.endswith('/edit'):
+                item_id = path.split('/')[2]
+                self.send_html(render_sell(edit_item_id=item_id, mode="seller"))
+            elif path.startswith('/items/'): 
+                raw_id = path.split('/')[-1]
+                self.send_html(render_detail(raw_id, mode=mode))
+            elif path == '/admin/deals': self.send_html(render_admin(mode=mode))
+            elif path == '/admin/deals/download': download_csv(self)
+            else: self.send_html(render_home(mode=mode))
+        except Exception as e:
+            self.send_html(f"<h1>処理エラー</h1><pre>{traceback.format_exc()}</pre><p><a href='/'>トップに戻る</a></p>")
+
+    def do_POST(self):
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            query = urllib.parse.parse_qs(parsed.query)
+            mode = query.get('mode', ['buyer'])[0]
+
+            length = int(self.headers.get('Content-Length', 0))
+            data = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8'))
+            conn = get_db()
+            c = conn.cursor()
+
+            if path == '/items/create':
+                shop_id_val = data.get('shop_id', ['1'])[0] or '1'
+                c.execute("""
+                    INSERT INTO items (
+                        shop_id, category, title, price, description, status, created_at, image_data,
+                        brand, item_condition, shipping_fee, shipping_method, shipping_area, shipping_days, likes_count
+                    ) VALUES (?, ?, ?, ?, ?, '出品中', ?, ?, ?, '未使用に近い', '送料込み', '直接引き取り', '愛知県', '1〜2日で発送', 0)
+                """, (
+                    shop_id_val, 
+                    data.get('category', ['バイク'])[0], 
+                    data.get('title', ['無題'])[0], 
+                    int(data.get('price', ['0'])[0] or 0), 
+                    data.get('description', [''])[0], 
+                    datetime.now().strftime('%Y-%m-%d %H:%M'), 
+                    data.get('image_data_json', [''])[0],
+                    data.get('brand', ['ホンダ'])[0]
+                ))
+                conn.commit()
+                self.send_redirect(f'/?mode={mode}')
+
+            elif path == '/items/update':
+                item_id = data.get('item_id', [''])[0]
+                shop_id_val = data.get('shop_id', ['1'])[0] or '1'
+                img_json = data.get('image_data_json', [''])[0]
+                
+                # 画像が新しく選ばれていれば更新、なければそのまま保持
+                if img_json:
+                    c.execute("""
+                        UPDATE items SET shop_id=?, category=?, title=?, price=?, description=?, brand=?, image_data=? WHERE id=?
+                    """, (
+                        shop_id_val, data.get('category', ['バイク'])[0], data.get('title', [''])[0], 
+                        int(data.get('price', ['0'])[0] or 0), data.get('description', [''])[0], data.get('brand', ['ホンダ'])[0],
+                        img_json, item_id
+                    ))
+                else:
+                    c.execute("""
+                        UPDATE items SET shop_id=?, category=?, title=?, price=?, description=?, brand=? WHERE id=?
+                    """, (
+                        shop_id_val, data.get('category', ['バイク'])[0], data.get('title', [''])[0], 
+                        int(data.get('price', ['0'])[0] or 0), data.get('description', [''])[0], data.get('brand', ['ホンダ'])[0],
+                        item_id
+                    ))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            elif path == '/items/like':
+                item_id = data.get('item_id', [''])[0]
+                c.execute("UPDATE items SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ?", (item_id,))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            elif path == '/items/delete':
+                item_id = data.get('item_id', [''])[0]
+                c.execute("DELETE FROM items WHERE id = ?", (item_id,))
+                c.execute("DELETE FROM comments WHERE id = ?", (item_id,))
+                conn.commit()
+                self.send_redirect(f'/?mode={mode}')
+
+            elif path == '/comments/create':
+                item_id = data.get('item_id', [''])[0]
+                shop_id = data.get('shop_id', ['1'])[0]
+                c.execute("INSERT INTO comments (item_id, shop_id, message, created_at) VALUES (?, ?, ?, ?)",
+                          (item_id, shop_id, data.get('message', [''])[0], datetime.now().strftime('%Y-%m-%d %H:%M')))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            elif path == '/deals/close':
+                item_id = data.get('item_id', [''])[0]
+                seller_shop_id = data.get('seller_shop_id', ['1'])[0]
+                buyer_shop_id = data.get('buyer_shop_id', ['2'])[0]
+                price = int(data.get('price', ['0'])[0] or 0)
+                fee_10pct = int(price * 0.10)
+                c.execute("INSERT INTO deals (item_id, seller_shop_id, buyer_shop_id, deal_price, fee_amount, closed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                          (item_id, seller_shop_id, buyer_shop_id, price, fee_10pct, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                c.execute("UPDATE items SET status = '成約済み' WHERE id = ?", (item_id,))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            conn.close()
+        except Exception as e:
+            self.send_html(f"<h1>処理エラー</h1><pre>{traceback.format_exc()}</pre><p><a href='/'>トップに戻る</a></p>")
+
+Handler = handler
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8000))
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("0.0.0.0", port), handler) as httpd:
+        print(f"★ 起動中 PORT: {port}")
+        httpd.serve_forever()
