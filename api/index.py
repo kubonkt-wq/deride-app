@@ -1101,4 +1101,331 @@ def render_admin_deals():
 
     <div class="bg-gradient-to-r from-emerald-700 to-teal-800 rounded-2xl p-6 text-white shadow-md flex flex-col sm:flex-row items-center justify-between gap-4">
       <div>
-        <span class="text-xs bg-emerald-950/50 px-2 py-0.5 rounded font-
+        <span class="text-xs bg-emerald-950/50 px-2 py-0.5 rounded font-bold uppercase tracking-wider">Excel連携</span>
+        <h2 class="text-lg font-black mt-1">成約データの一括ダウンロード</h2>
+        <p class="text-xs text-emerald-100 mt-0.5">月次の新聞専売店別手数料精算用CSVファイルをワンクリックで出力します。</p>
+      </div>
+      <a href="/admin/deals/download" class="w-full sm:w-auto text-center px-6 py-3.5 bg-yellow-400 hover:bg-yellow-300 text-slate-950 font-black text-sm rounded-xl shadow-lg transition active:scale-95 flex items-center justify-center gap-2">
+        <span>📊 今すぐExcel(CSV)を出力する</span>
+      </a>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+      <div class="bg-slate-800 p-4 text-white flex justify-between items-center">
+        <h2 class="font-bold text-sm">📋 成約明細一覧（リアルタイム）</h2>
+        <span class="text-xs text-slate-300">更新: {datetime.now().strftime('%H:%M:%S')}</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left min-w-[700px]">
+          <tr class="bg-slate-100 border-b border-slate-300 text-[11px] text-slate-600 uppercase">
+            <th class="p-3 font-semibold">成約日時</th>
+            <th class="p-3 font-semibold">商品名</th>
+            <th class="p-3 font-semibold">取引店舗</th>
+            <th class="p-3 text-right font-semibold">決済額(税込)</th>
+            <th class="p-3 text-right font-semibold">手数料(10%)</th>
+            <th class="p-3 text-right font-semibold">出品者受取額</th>
+          </tr>
+          {rows}
+        </table>
+      </div>
+    </div>
+  </main>
+</body>
+</html>"""
+
+def download_admin_csv(handler_obj):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
+        FROM deals JOIN items ON deals.item_id = items.id 
+        JOIN shops as seller ON deals.seller_shop_id = seller.id 
+        JOIN shops as buyer ON deals.buyer_shop_id = buyer.id ORDER BY deals.closed_at DESC
+    """)
+    deals = c.fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator='\n')
+    writer.writerow(['取引ID', '成約日時', '商品名', '出品店舗(売手)', '購入店舗(買手)', '決済額(成約価格)', 'でらイド手数料(10%)', '出品者受取額'])
+    for d in deals:
+        writer.writerow([d['id'], d['closed_at'], d['title'], d['s_name'], d['b_name'], d['deal_price'], d['fee_amount'], d['deal_price'] - d['fee_amount']])
+        
+    csv_data = output.getvalue().encode('shift_jis', errors='replace')
+    handler_obj.send_response(200)
+    handler_obj.send_header('Content-Type', 'text/csv; charset=Shift_JIS')
+    handler_obj.send_header('Content-Disposition', f'attachment; filename="deride_deals_{datetime.now().strftime("%Y%m%d")}.csv"')
+    handler_obj.end_headers()
+    handler_obj.wfile.write(csv_data)
+
+# ==========================================
+# 6. リクエストハンドラー
+# ==========================================
+class handler(http.server.BaseHTTPRequestHandler):
+    def send_html(self, html, cookies=None):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        if cookies:
+            for morsel in cookies.values():
+                self.send_header('Set-Cookie', morsel.OutputString())
+        self.end_headers()
+        self.wfile.write(html.encode('utf-8'))
+        
+    def send_raw(self, content_type, data):
+        self.send_response(200)
+        self.send_header('Content-type', content_type)
+        self.end_headers()
+        self.wfile.write(data.encode('utf-8'))
+        
+    def send_redirect(self, url, cookies=None):
+        self.send_response(303)
+        self.send_header('Location', url)
+        if cookies:
+            for morsel in cookies.values():
+                self.send_header('Set-Cookie', morsel.OutputString())
+        self.end_headers()
+
+    def do_GET(self):
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            query = urllib.parse.parse_qs(parsed.query)
+            mode = query.get('mode', ['buyer'])[0]
+            current_user = get_current_user(self)
+
+            if path == '/banner.jpg':
+                candidates = ['banner.jpg', os.path.join(os.path.dirname(__file__), 'banner.jpg'), os.path.join(os.path.dirname(__file__), '..', 'banner.jpg')]
+                for p in candidates:
+                    if os.path.exists(p):
+                        try:
+                            with open(p, 'rb') as f:
+                                self.send_response(200)
+                                self.send_header('Content-type', 'image/jpeg')
+                                self.end_headers()
+                                self.wfile.write(f.read())
+                            return
+                        except: pass
+                self.send_error(404)
+                return
+
+            elif path == '/manifest.json': self.send_raw('application/manifest+json; charset=utf-8', MANIFEST_DATA)
+            elif path == '/sw.js': self.send_raw('application/javascript; charset=utf-8', SW_JS)
+            elif path == '/app-icon.svg': self.send_raw('image/svg+xml; charset=utf-8', APP_ICON_SVG)
+                
+            # 一般画面
+            elif path in ('', '/', '/index.html'): self.send_html(render_home(mode=mode, current_user=current_user))
+            elif path == '/login': self.send_html(render_login(mode=mode))
+            elif path == '/register': self.send_html(render_register(mode=mode))
+            elif path == '/likes': self.send_html(render_likes(mode=mode, current_user=current_user))
+            elif path == '/sell': self.send_html(render_sell(mode="seller", current_user=current_user))
+            elif path == '/mypage': self.send_html(render_mypage(mode=mode, current_user=current_user))
+            elif path.startswith('/items/') and path.endswith('/edit'):
+                item_id = path.split('/')[2]
+                self.send_html(render_sell(edit_item_id=item_id, mode="seller", current_user=current_user))
+            elif path.startswith('/items/'): 
+                raw_id = path.split('/')[-1]
+                self.send_html(render_detail(raw_id, mode=mode, current_user=current_user))
+
+            # 管理者専用画面
+            elif path == '/admin/login':
+                if is_admin_logged_in(self):
+                    self.send_redirect('/admin/deals')
+                else:
+                    self.send_html(render_admin_login())
+            elif path == '/admin/deals':
+                if not is_admin_logged_in(self):
+                    self.send_redirect('/admin/login')
+                else:
+                    self.send_html(render_admin_deals())
+            elif path == '/admin/deals/download':
+                if not is_admin_logged_in(self):
+                    self.send_redirect('/admin/login')
+                else:
+                    download_admin_csv(self)
+            else:
+                self.send_html(render_home(mode=mode, current_user=current_user))
+        except Exception as e:
+            self.send_html(f"<h1>処理エラー</h1><pre>{traceback.format_exc()}</pre><p><a href='/'>トップに戻る</a></p>")
+
+    def do_POST(self):
+        try:
+            parsed = urllib.parse.urlparse(self.path)
+            path = parsed.path
+            query = urllib.parse.parse_qs(parsed.query)
+            mode = query.get('mode', ['buyer'])[0]
+
+            length = int(self.headers.get('Content-Length', 0))
+            data = urllib.parse.parse_qs(self.rfile.read(length).decode('utf-8'))
+            conn = get_db()
+            c = conn.cursor()
+
+            # 1. 専売店 ログイン処理
+            if path == '/login':
+                username = data.get('username', [''])[0].strip()
+                password = data.get('password', [''])[0]
+                c.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username, hash_password(password)))
+                user = c.fetchone()
+                if user:
+                    token = secrets.token_hex(24)
+                    c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
+                              (token, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M')))
+                    conn.commit()
+                    cookie = http.cookies.SimpleCookie()
+                    cookie['deride_session'] = token
+                    cookie['deride_session']['path'] = '/'
+                    cookie['deride_session']['httponly'] = True
+                    self.send_redirect(f'/?mode={mode}', cookies=cookie)
+                else:
+                    self.send_html(render_login(error_msg="ユーザーIDまたはパスワードが正しくありません", mode=mode))
+
+            # 2. 専売店 新規登録処理
+            elif path == '/register':
+                shop_id = data.get('shop_id', [''])[0]
+                username = data.get('username', [''])[0].strip()
+                password = data.get('password', [''])[0]
+                if not shop_id or not username or len(password) < 4:
+                    self.send_html(render_register(error_msg="店舗を選択し、パスワードは4文字以上で入力してください", mode=mode))
+                    return
+
+                c.execute("SELECT id FROM users WHERE username = ?", (username,))
+                if c.fetchone():
+                    self.send_html(render_register(error_msg="そのログインIDはすでに登録されています", mode=mode))
+                    return
+
+                c.execute("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                          (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
+                new_user_id = c.lastrowid
+                token = secrets.token_hex(24)
+                c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
+                          (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                conn.commit()
+
+                cookie = http.cookies.SimpleCookie()
+                cookie['deride_session'] = token
+                cookie['deride_session']['path'] = '/'
+                cookie['deride_session']['httponly'] = True
+                self.send_redirect(f'/?mode={mode}', cookies=cookie)
+
+            # 3. ログアウト処理
+            elif path == '/logout':
+                cookie_header = self.headers.get('Cookie', '')
+                if cookie_header:
+                    cookie = http.cookies.SimpleCookie(cookie_header)
+                    token = cookie.get('deride_session')
+                    if token:
+                        c.execute("DELETE FROM sessions WHERE token = ?", (token.value,))
+                        conn.commit()
+                res_cookie = http.cookies.SimpleCookie()
+                res_cookie['deride_session'] = ''
+                res_cookie['deride_session']['path'] = '/'
+                res_cookie['deride_session']['expires'] = 'Thu, 01 Jan 1970 00:00:00 GMT'
+                self.send_redirect(f'/?mode={mode}', cookies=res_cookie)
+
+            # 4. 管理者ログイン処理（ID: admin / PASS: admin2026）
+            elif path == '/admin/login':
+                admin_user = data.get('admin_user', [''])[0].strip()
+                admin_pass = data.get('admin_pass', [''])[0]
+                if admin_user == 'admin' and admin_pass == 'admin2026':
+                    token = secrets.token_hex(24)
+                    c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (?, 0, 1, ?)",
+                              (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                    conn.commit()
+                    cookie = http.cookies.SimpleCookie()
+                    cookie['deride_admin_session'] = token
+                    cookie['deride_admin_session']['path'] = '/'
+                    cookie['deride_admin_session']['httponly'] = True
+                    self.send_redirect('/admin/deals', cookies=cookie)
+                else:
+                    self.send_html(render_admin_login(error_msg="管理者IDまたはパスワードが無効です"))
+
+            elif path == '/admin/logout':
+                cookie_header = self.headers.get('Cookie', '')
+                if cookie_header:
+                    cookie = http.cookies.SimpleCookie(cookie_header)
+                    token = cookie.get('deride_admin_session')
+                    if token:
+                        c.execute("DELETE FROM sessions WHERE token = ?", (token.value,))
+                        conn.commit()
+                res_cookie = http.cookies.SimpleCookie()
+                res_cookie['deride_admin_session'] = ''
+                res_cookie['deride_admin_session']['path'] = '/'
+                res_cookie['deride_admin_session']['expires'] = 'Thu, 01 Jan 1970 00:00:00 GMT'
+                self.send_redirect('/admin/login', cookies=res_cookie)
+
+            # 5. 商品登録・成約処理
+            elif path == '/items/create':
+                c.execute("""
+                    INSERT INTO items (
+                        shop_id, category, title, price, description, status, created_at, image_data,
+                        brand, item_condition, shipping_fee, shipping_method, shipping_area, shipping_days, likes_count
+                    ) VALUES (?, ?, ?, ?, ?, '出品中', ?, ?, ?, '未使用に近い', '送料込み', '直接引き取り', '愛知県', '1〜2日で発送', 0)
+                """, (
+                    data.get('shop_id', ['1'])[0], 
+                    data.get('category', ['バイク'])[0], 
+                    data.get('title', ['無題'])[0], 
+                    int(data.get('price', ['0'])[0] or 0), 
+                    data.get('description', [''])[0], 
+                    datetime.now().strftime('%Y-%m-%d %H:%M'), 
+                    data.get('image_data_json', [''])[0],
+                    data.get('brand', ['ホンダ'])[0]
+                ))
+                conn.commit()
+                self.send_redirect(f'/?mode={mode}')
+
+            elif path == '/items/update':
+                item_id = data.get('item_id', [''])[0]
+                img_json = data.get('image_data_json', [''])[0]
+                if img_json:
+                    c.execute("UPDATE items SET category=?, title=?, price=?, description=?, brand=?, image_data=? WHERE id=?",
+                              (data.get('category', ['バイク'])[0], data.get('title', [''])[0], int(data.get('price', ['0'])[0] or 0), data.get('description', [''])[0], data.get('brand', ['ホンダ'])[0], img_json, item_id))
+                else:
+                    c.execute("UPDATE items SET category=?, title=?, price=?, description=?, brand=? WHERE id=?",
+                              (data.get('category', ['バイク'])[0], data.get('title', [''])[0], int(data.get('price', ['0'])[0] or 0), data.get('description', [''])[0], data.get('brand', ['ホンダ'])[0], item_id))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            elif path == '/items/like':
+                item_id = data.get('item_id', [''])[0]
+                c.execute("UPDATE items SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ?", (item_id,))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            elif path == '/items/delete':
+                item_id = data.get('item_id', [''])[0]
+                c.execute("DELETE FROM items WHERE id = ?", (item_id,))
+                c.execute("DELETE FROM comments WHERE id = ?", (item_id,))
+                conn.commit()
+                self.send_redirect(f'/?mode={mode}')
+
+            elif path == '/comments/create':
+                item_id = data.get('item_id', [''])[0]
+                shop_id = data.get('shop_id', ['1'])[0]
+                c.execute("INSERT INTO comments (item_id, shop_id, message, created_at) VALUES (?, ?, ?, ?)",
+                          (item_id, shop_id, data.get('message', [''])[0], datetime.now().strftime('%Y-%m-%d %H:%M')))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            elif path == '/deals/close':
+                item_id = data.get('item_id', [''])[0]
+                seller_shop_id = data.get('seller_shop_id', ['1'])[0]
+                buyer_shop_id = data.get('buyer_shop_id', ['2'])[0]
+                price = int(data.get('price', ['0'])[0] or 0)
+                fee_10pct = int(price * 0.10)
+                c.execute("INSERT INTO deals (item_id, seller_shop_id, buyer_shop_id, deal_price, fee_amount, closed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                          (item_id, seller_shop_id, buyer_shop_id, price, fee_10pct, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                c.execute("UPDATE items SET status = '成約済み' WHERE id = ?", (item_id,))
+                conn.commit()
+                self.send_redirect(f"/items/{item_id}?mode={mode}")
+
+            conn.close()
+        except Exception as e:
+            self.send_html(f"<h1>処理エラー</h1><pre>{traceback.format_exc()}</pre><p><a href='/'>トップに戻る</a></p>")
+
+Handler = handler
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8000))
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("0.0.0.0", port), handler) as httpd:
+        print(f"★ 起動中 PORT: {port}")
+        httpd.serve_forever()
