@@ -1034,6 +1034,9 @@ def render_mypage(mode="buyer", current_user=None):
     """
     return render_page(content, active_tab="mypage", mode=mode, current_user=current_user)
 
+# ==========================================
+# 5. 管理者専用画面
+# ==========================================
 def render_admin_login(error_msg=""):
     err_box = f'<div class="bg-red-50 text-red-600 p-3 rounded-lg text-xs font-bold border border-red-200 mb-4">{error_msg}</div>' if error_msg else ''
     return f"""<!DOCTYPE html>
