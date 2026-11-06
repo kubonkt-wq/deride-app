@@ -14,7 +14,7 @@ import secrets
 from datetime import datetime
 
 # ==========================================
-# 0. データベース & ステートレス認証設定
+# 0. 高速化データベース接続 & 認証設定
 # ==========================================
 DATABASE_URL = os.environ.get('DATABASE_URL')
 USE_POSTGRES = bool(DATABASE_URL)
@@ -26,25 +26,24 @@ if USE_POSTGRES:
 DB_PATH = os.path.join(tempfile.gettempdir(), 'deride_platform.db')
 AUTH_SECRET = "deride-chunichi-auth-secret-key-2026"
 
-class DBConnection:
-    def __init__(self):
-        if USE_POSTGRES:
-            self.conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-        else:
-            self.conn = sqlite3.connect(DB_PATH)
-            self.conn.row_factory = sqlite3.Row
-
-    def cursor(self):
-        return self.conn.cursor()
-
-    def commit(self):
-        self.conn.commit()
-
-    def close(self):
-        self.conn.close()
+_CACHED_CONN = None
 
 def get_db():
-    return DBConnection()
+    global _CACHED_CONN
+    if USE_POSTGRES:
+        if _CACHED_CONN is not None:
+            try:
+                # 既存の接続が生きているか軽量チェック
+                _CACHED_CONN.cursor().execute("SELECT 1")
+                return _CACHED_CONN
+            except Exception:
+                _CACHED_CONN = None
+        _CACHED_CONN = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor, connect_timeout=5)
+        return _CACHED_CONN
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def hash_password(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
@@ -68,93 +67,7 @@ def verify_data(signed_str):
     return None
 
 # ==========================================
-# 1. 店舗マスターと初期化
-# ==========================================
-def load_shops_from_csv():
-    shops = []
-    csv_paths = [
-        'shops.csv',
-        os.path.join(os.path.dirname(__file__), 'shops.csv'),
-        os.path.join(os.path.dirname(__file__), '..', 'shops.csv')
-    ]
-    target_csv = None
-    for p in csv_paths:
-        if os.path.exists(p):
-            target_csv = p
-            break
-
-    if target_csv:
-        for enc in ['utf-8-sig', 'shift_jis', 'cp932', 'utf-8']:
-            try:
-                with open(target_csv, 'r', encoding=enc) as f:
-                    reader = csv.reader(f)
-                    next(reader, None)
-                    for idx, row in enumerate(reader, 1):
-                        if not row or len(row) < 2: continue
-                        s_id = row[0].strip() if len(row) > 0 and row[0].strip().isdigit() else idx
-                        pref = row[1].strip() if len(row) > 1 else "愛知県"
-                        district = row[2].strip() if len(row) > 2 else ""
-                        branch = row[3].strip() if len(row) > 3 else ""
-                        group = row[4].strip() if len(row) > 4 else ""
-                        name = row[5].strip() if len(row) > 5 else (row[1].strip() if len(row) > 1 else f"専売店{idx}")
-                        shops.append((int(s_id), pref, district, branch, group, name))
-                if shops:
-                    break
-            except Exception:
-                continue
-
-    if not shops:
-        shops = [
-            (1, '愛知県', '名古屋市', '名古屋中支部', '栄班', '中日新聞 栄専売店'),
-            (2, '愛知県', '名古屋市', '名古屋北支部', '名北班', '中日新聞 名北専売店'),
-            (3, '愛知県', '尾張地区', '一宮支部', '一宮班', '中日新聞 一宮専売店'),
-            (4, '岐阜県', '岐阜地区', '岐阜南支部', '岐阜南班', '中日新聞 岐阜南専売店'),
-            (5, '三重県', '三重地区', '津支部', '津班', '中日新聞 津専売店')
-        ]
-    return shops
-
-def init_db():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        
-        if USE_POSTGRES:
-            c.execute("""CREATE TABLE IF NOT EXISTS shops (id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, shop_id INTEGER, username TEXT UNIQUE, password_hash TEXT, created_at TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER, is_admin INTEGER DEFAULT 0, created_at TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS items (id SERIAL PRIMARY KEY, shop_id INTEGER, category TEXT, title TEXT, price INTEGER, status TEXT, description TEXT, created_at TEXT, image_data TEXT, brand TEXT, item_condition TEXT, shipping_fee TEXT, shipping_method TEXT, shipping_area TEXT, shipping_days TEXT, likes_count INTEGER DEFAULT 0)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS deals (id SERIAL PRIMARY KEY, item_id INTEGER, seller_shop_id INTEGER, buyer_shop_id INTEGER, deal_price INTEGER, fee_amount INTEGER, closed_at TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS comments (id SERIAL PRIMARY KEY, item_id INTEGER, shop_id INTEGER, message TEXT, created_at TEXT)""")
-        else:
-            c.execute("""CREATE TABLE IF NOT EXISTS shops (id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER, username TEXT UNIQUE, password_hash TEXT, created_at TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER, is_admin INTEGER DEFAULT 0, created_at TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER, category TEXT, title TEXT, price INTEGER, status TEXT, description TEXT, created_at TEXT, image_data TEXT, brand TEXT, item_condition TEXT, shipping_fee TEXT, shipping_method TEXT, shipping_area TEXT, shipping_days TEXT, likes_count INTEGER DEFAULT 0)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, seller_shop_id INTEGER, buyer_shop_id INTEGER, deal_price INTEGER, fee_amount INTEGER, closed_at TEXT)""")
-            c.execute("""CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, shop_id INTEGER, message TEXT, created_at TEXT)""")
-
-        c.execute("SELECT count(*) FROM shops")
-        row = c.fetchone()
-        shop_count = row['count'] if USE_POSTGRES else row[0]
-        
-        if shop_count == 0:
-            shop_data = load_shops_from_csv()
-            for s in shop_data:
-                c.execute(q("INSERT INTO shops (id, pref, district, branch, group_name, name) VALUES (%s, %s, %s, %s, %s, %s)"), s)
-            
-            first_shop_id = shop_data[0][0] if shop_data else 1
-            c.execute(q("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (%s, %s, %s, %s)"),
-                      (first_shop_id, 'sakae', hash_password('sakae123'), datetime.now().strftime('%Y-%m-%d %H:%M')))
-
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"DB初期化エラー: {e}")
-
-init_db()
-
-# ==========================================
-# 2. PWA設定
+# 1. PWA設定
 # ==========================================
 APP_ICON_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%231e40af'/><text x='50%' y='48%' font-size='42' text-anchor='middle' dominant-baseline='central'>🏍️</text><text x='50%' y='80%' font-size='15' font-weight='bold' fill='white' text-anchor='middle'>公式 でらイド</text></svg>"""
 
@@ -171,9 +84,9 @@ MANIFEST_DATA = json.dumps({
 SW_JS = "self.addEventListener('install', e => self.skipWaiting()); self.addEventListener('activate', e => self.clients.claim()); self.addEventListener('fetch', e => e.respondWith(fetch(e.request).catch(() => caches.match(e.request))));"
 
 # ==========================================
-# 3. 認証ヘルパー
+# 2. 認証ヘルパー（接続を共有して高速化）
 # ==========================================
-def get_current_user(handler_obj):
+def get_current_user(handler_obj, conn=None):
     cookie_header = handler_obj.headers.get('Cookie', '')
     if not cookie_header: return None
     cookie = http.cookies.SimpleCookie(cookie_header)
@@ -185,7 +98,11 @@ def get_current_user(handler_obj):
     if verified and verified.startswith('user:'):
         user_id = int(verified.split(':')[1])
     
-    conn = get_db()
+    should_close = False
+    if conn is None:
+        conn = get_db()
+        if not USE_POSTGRES: should_close = True
+
     c = conn.cursor()
     if user_id:
         c.execute(q("""
@@ -199,10 +116,10 @@ def get_current_user(handler_obj):
             WHERE ses.token = %s
         """), (token.value,))
     user = c.fetchone()
-    conn.close()
+    if should_close: conn.close()
     return user
 
-def is_admin_logged_in(handler_obj):
+def is_admin_logged_in(handler_obj, conn=None):
     cookie_header = handler_obj.headers.get('Cookie', '')
     if not cookie_header: return False
     cookie = http.cookies.SimpleCookie(cookie_header)
@@ -213,15 +130,19 @@ def is_admin_logged_in(handler_obj):
     if verified == "admin_authenticated":
         return True
     
-    conn = get_db()
+    should_close = False
+    if conn is None:
+        conn = get_db()
+        if not USE_POSTGRES: should_close = True
+
     c = conn.cursor()
     c.execute(q("SELECT is_admin FROM sessions WHERE token = %s AND is_admin = 1"), (token.value,))
     admin = c.fetchone()
-    conn.close()
+    if should_close: conn.close()
     return admin is not None
 
 # ==========================================
-# 4. 共通HTMLレイアウト
+# 3. 共通HTMLレイアウト
 # ==========================================
 BASE_HTML = """<!DOCTYPE html>
 <html lang="ja">
@@ -356,8 +277,8 @@ def build_item_cards(items, mode="buyer"):
         """
     return items_html
 
-def render_home(mode="buyer", current_user=None):
-    conn = get_db()
+# --- 画面レンダリング ---
+def render_home(conn, mode="buyer", current_user=None):
     c = conn.cursor()
     c.execute("""
         SELECT i.*, s.name, s.pref, s.branch
@@ -365,7 +286,6 @@ def render_home(mode="buyer", current_user=None):
         ORDER BY i.id DESC
     """)
     items = c.fetchall()
-    conn.close()
 
     items_html = build_item_cards(items, mode=mode) or '<div class="col-span-full text-center py-16 bg-white rounded-xl border border-dashed border-gray-300 text-gray-400"><p class="text-sm font-bold">出品中の車両・部品はありません。</p></div>'
 
@@ -434,16 +354,13 @@ def render_login(error_msg="", mode="buyer"):
     """
     return render_page(content, active_tab="mypage", mode=mode)
 
-def render_register(error_msg="", mode="buyer"):
-    conn = get_db()
+def render_register(conn, error_msg="", mode="buyer"):
     c = conn.cursor()
     c.execute("SELECT id, pref, district, branch, group_name, name FROM shops ORDER BY pref, district, branch, group_name, name")
     raw_shops = c.fetchall()
-    conn.close()
     
     shops_data = [{"id": r['id'], "p": r['pref'] or "", "d": r['district'] or "", "b": r['branch'] or "", "g": r['group_name'] or "", "n": r['name'] or ""} for r in raw_shops]
     shops_json = json.dumps(shops_data, ensure_ascii=False)
-
     err_box = f'<div class="bg-red-50 text-red-600 p-3 rounded-xl text-xs font-bold border border-red-200 mb-4">{error_msg}</div>' if error_msg else ''
 
     content = f"""
@@ -562,7 +479,7 @@ def render_register(error_msg="", mode="buyer"):
     """
     return render_page(content, active_tab="mypage", mode=mode)
 
-def render_sell(edit_item_id=None, mode="seller", current_user=None):
+def render_sell(conn, edit_item_id=None, mode="seller", current_user=None):
     if not current_user:
         return render_page(f"""
         <div class="max-w-md mx-auto text-center py-12 bg-white rounded-2xl border p-6 mt-4">
@@ -573,13 +490,11 @@ def render_sell(edit_item_id=None, mode="seller", current_user=None):
         </div>
         """, active_tab="sell", mode=mode)
 
-    conn = get_db()
     c = conn.cursor()
     item_to_edit = None
     if edit_item_id:
         c.execute(q("SELECT * FROM items WHERE id=%s"), (edit_item_id,))
         item_to_edit = c.fetchone()
-    conn.close()
 
     is_edit = item_to_edit is not None
     form_action = f"/items/update?mode={mode}" if is_edit else f"/items/create?mode={mode}"
@@ -758,8 +673,7 @@ def render_sell(edit_item_id=None, mode="seller", current_user=None):
     """
     return render_page(content, active_tab="sell", mode=mode, current_user=current_user)
 
-def render_detail(item_id, mode="buyer", current_user=None):
-    conn = get_db()
+def render_detail(conn, item_id, mode="buyer", current_user=None):
     c = conn.cursor()
     c.execute(q("""
         SELECT i.*, s.name, s.pref, s.branch, s.district, s.group_name
@@ -770,7 +684,6 @@ def render_detail(item_id, mode="buyer", current_user=None):
     
     c.execute(q("SELECT comments.message, comments.created_at, shops.name FROM comments JOIN shops ON comments.shop_id = shops.id WHERE comments.item_id=%s ORDER BY comments.id ASC"), (item_id,))
     comments = c.fetchall()
-    conn.close()
 
     if not item: return render_page("<p class='p-8 text-center'>商品が見つかりません。<br><a href='/' class='text-blue-600 font-bold underline mt-2 inline-block'>トップに戻る</a></p>", active_tab="home", mode=mode, current_user=current_user)
     
@@ -933,22 +846,19 @@ def render_detail(item_id, mode="buyer", current_user=None):
     """
     return render_page(content, active_tab="home", mode=mode, current_user=current_user)
 
-def render_likes(mode="buyer", current_user=None):
-    conn = get_db()
+def render_likes(conn, mode="buyer", current_user=None):
     c = conn.cursor()
     c.execute("""SELECT i.*, s.name, s.pref, s.branch FROM items i JOIN shops s ON i.shop_id = s.id WHERE COALESCE(i.likes_count, 0) > 0 ORDER BY i.likes_count DESC, i.id DESC""")
     items = c.fetchall()
-    conn.close()
 
     items_html = build_item_cards(items, mode=mode) or f'<div class="col-span-full text-center py-16 bg-white rounded-xl border border-dashed border-pink-200 text-gray-400"><span class="text-4xl block mb-2">❤️</span><p class="text-sm font-bold text-gray-700">まだ「いいね」された商品はありません</p><a href="/?mode={mode}" class="inline-block mt-4 px-4 py-2 bg-blue-600 text-white font-bold text-xs rounded-lg shadow hover:bg-blue-700">商品を探しにいく</a></div>'
     content = f'<div class="mb-4"><h2 class="text-base font-bold text-gray-900 flex items-center gap-1.5"><span class="text-pink-600 text-lg">❤️</span><span>いいね！された人気商品</span><span class="text-xs font-normal text-gray-500">({len(items)}件)</span></h2></div><div class="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">{items_html}</div>'
     return render_page(content, active_tab="likes", mode=mode, current_user=current_user)
 
-def render_mypage(mode="buyer", current_user=None):
+def render_mypage(conn, mode="buyer", current_user=None):
     if not current_user:
         return render_login(mode=mode)
 
-    conn = get_db()
     c = conn.cursor()
     shop_id = current_user['shop_id']
 
@@ -1004,7 +914,6 @@ def render_mypage(mode="buyer", current_user=None):
           </div>
         </div>
         """
-    conn.close()
 
     content = f"""
     <div class="space-y-4">
@@ -1034,9 +943,7 @@ def render_mypage(mode="buyer", current_user=None):
     """
     return render_page(content, active_tab="mypage", mode=mode, current_user=current_user)
 
-# ==========================================
-# 5. 管理者専用画面
-# ==========================================
+# --- 管理者専用画面 ---
 def render_admin_login(error_msg=""):
     err_box = f'<div class="bg-red-50 text-red-600 p-3 rounded-lg text-xs font-bold border border-red-200 mb-4">{error_msg}</div>' if error_msg else ''
     return f"""<!DOCTYPE html>
@@ -1077,8 +984,7 @@ def render_admin_login(error_msg=""):
 </body>
 </html>"""
 
-def render_admin_deals():
-    conn = get_db()
+def render_admin_deals(conn):
     c = conn.cursor()
     c.execute("""
         SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
@@ -1087,7 +993,6 @@ def render_admin_deals():
         JOIN shops as buyer ON deals.buyer_shop_id = buyer.id ORDER BY deals.closed_at DESC
     """)
     deals = c.fetchall()
-    conn.close()
 
     total_price = sum(d['deal_price'] for d in deals)
     total_fee = sum(d['fee_amount'] for d in deals)
@@ -1180,8 +1085,7 @@ def render_admin_deals():
 </body>
 </html>"""
 
-def download_admin_csv(handler_obj):
-    conn = get_db()
+def download_admin_csv(handler_obj, conn):
     c = conn.cursor()
     c.execute("""
         SELECT deals.id, deals.closed_at, items.title, seller.name as s_name, buyer.name as b_name, deals.deal_price, deals.fee_amount 
@@ -1190,7 +1094,6 @@ def download_admin_csv(handler_obj):
         JOIN shops as buyer ON deals.buyer_shop_id = buyer.id ORDER BY deals.closed_at DESC
     """)
     deals = c.fetchall()
-    conn.close()
 
     output = io.StringIO()
     writer = csv.writer(output, lineterminator='\n')
@@ -1206,7 +1109,7 @@ def download_admin_csv(handler_obj):
     handler_obj.wfile.write(csv_data)
 
 # ==========================================
-# 6. リクエストハンドラー
+# 4. リクエストハンドラー（接続の再利用）
 # ==========================================
 class handler(http.server.BaseHTTPRequestHandler):
     def send_html(self, html, cookies=None):
@@ -1238,7 +1141,6 @@ class handler(http.server.BaseHTTPRequestHandler):
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query)
             mode = query.get('mode', ['buyer'])[0]
-            current_user = get_current_user(self)
 
             if path == '/banner.jpg':
                 candidates = ['banner.jpg', os.path.join(os.path.dirname(__file__), 'banner.jpg'), os.path.join(os.path.dirname(__file__), '..', 'banner.jpg')]
@@ -1258,37 +1160,40 @@ class handler(http.server.BaseHTTPRequestHandler):
             elif path == '/manifest.json': self.send_raw('application/manifest+json; charset=utf-8', MANIFEST_DATA)
             elif path == '/sw.js': self.send_raw('application/javascript; charset=utf-8', SW_JS)
             elif path == '/app-icon.svg': self.send_raw('image/svg+xml; charset=utf-8', APP_ICON_SVG)
-                
-            elif path in ('', '/', '/index.html'): self.send_html(render_home(mode=mode, current_user=current_user))
             elif path == '/login': self.send_html(render_login(mode=mode))
-            elif path == '/register': self.send_html(render_register(mode=mode))
-            elif path == '/likes': self.send_html(render_likes(mode=mode, current_user=current_user))
-            elif path == '/sell': self.send_html(render_sell(mode="seller", current_user=current_user))
-            elif path == '/mypage': self.send_html(render_mypage(mode=mode, current_user=current_user))
-            elif path.startswith('/items/') and path.endswith('/edit'):
-                item_id = path.split('/')[2]
-                self.send_html(render_sell(edit_item_id=item_id, mode="seller", current_user=current_user))
-            elif path.startswith('/items/'): 
-                raw_id = path.split('/')[-1]
-                self.send_html(render_detail(raw_id, mode=mode, current_user=current_user))
-
             elif path == '/admin/login':
-                if is_admin_logged_in(self):
+                conn = get_db()
+                if is_admin_logged_in(self, conn=conn):
                     self.send_redirect('/admin/deals')
                 else:
                     self.send_html(render_admin_login())
-            elif path == '/admin/deals':
-                if not is_admin_logged_in(self):
-                    self.send_redirect('/admin/login')
-                else:
-                    self.send_html(render_admin_deals())
-            elif path == '/admin/deals/download':
-                if not is_admin_logged_in(self):
-                    self.send_redirect('/admin/login')
-                else:
-                    download_admin_csv(self)
             else:
-                self.send_html(render_home(mode=mode, current_user=current_user))
+                conn = get_db()
+                current_user = get_current_user(self, conn=conn)
+
+                if path in ('', '/', '/index.html'): self.send_html(render_home(conn, mode=mode, current_user=current_user))
+                elif path == '/register': self.send_html(render_register(conn, mode=mode))
+                elif path == '/likes': self.send_html(render_likes(conn, mode=mode, current_user=current_user))
+                elif path == '/sell': self.send_html(render_sell(conn, mode="seller", current_user=current_user))
+                elif path == '/mypage': self.send_html(render_mypage(conn, mode=mode, current_user=current_user))
+                elif path.startswith('/items/') and path.endswith('/edit'):
+                    item_id = path.split('/')[2]
+                    self.send_html(render_sell(conn, edit_item_id=item_id, mode="seller", current_user=current_user))
+                elif path.startswith('/items/'): 
+                    raw_id = path.split('/')[-1]
+                    self.send_html(render_detail(conn, raw_id, mode=mode, current_user=current_user))
+                elif path == '/admin/deals':
+                    if not is_admin_logged_in(self, conn=conn):
+                        self.send_redirect('/admin/login')
+                    else:
+                        self.send_html(render_admin_deals(conn))
+                elif path == '/admin/deals/download':
+                    if not is_admin_logged_in(self, conn=conn):
+                        self.send_redirect('/admin/login')
+                    else:
+                        download_admin_csv(self, conn)
+                else:
+                    self.send_html(render_home(conn, mode=mode, current_user=current_user))
         except Exception as e:
             self.send_html(f"<h1>処理エラー</h1><pre>{traceback.format_exc()}</pre><p><a href='/'>トップに戻る</a></p>")
 
@@ -1308,14 +1213,12 @@ class handler(http.server.BaseHTTPRequestHandler):
                 username = data.get('username', [''])[0].strip()
                 password = data.get('password', [''])[0]
 
-                # 管理者ログイン判定
                 if username == 'admin' and password == 'admin2026':
                     token = sign_data("admin_authenticated")
                     cookie = http.cookies.SimpleCookie()
                     cookie['deride_admin_session'] = token
                     cookie['deride_admin_session']['path'] = '/'
                     cookie['deride_admin_session']['httponly'] = True
-                    conn.close()
                     self.send_redirect('/admin/deals', cookies=cookie)
                     return
 
@@ -1323,11 +1226,6 @@ class handler(http.server.BaseHTTPRequestHandler):
                 user = c.fetchone()
                 if user:
                     token = sign_data(f"user:{user['id']}")
-                    c.execute(q("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (%s, %s, 0, %s) ON CONFLICT (token) DO NOTHING"),
-                              (token, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M'))) if USE_POSTGRES else \
-                    c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
-                              (token, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M')))
-                    conn.commit()
                     cookie = http.cookies.SimpleCookie()
                     cookie['deride_session'] = token
                     cookie['deride_session']['path'] = '/'
@@ -1341,30 +1239,25 @@ class handler(http.server.BaseHTTPRequestHandler):
                 username = data.get('username', [''])[0].strip()
                 password = data.get('password', [''])[0]
                 if not shop_id or not username or len(password) < 4:
-                    self.send_html(render_register(error_msg="店舗を選択し、パスワードは4文字以上で入力してください", mode=mode))
+                    self.send_html(render_register(conn, error_msg="店舗を選択し、パスワードは4文字以上で入力してください", mode=mode))
                     return
 
                 c.execute(q("SELECT id FROM users WHERE username = %s"), (username,))
                 if c.fetchone():
-                    self.send_html(render_register(error_msg="そのログインIDはすでに登録されています", mode=mode))
+                    self.send_html(render_register(conn, error_msg="そのログインIDはすでに登録されています", mode=mode))
                     return
 
                 if USE_POSTGRES:
                     c.execute("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
                               (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
                     new_user_id = c.fetchone()['id']
-                    token = sign_data(f"user:{new_user_id}")
-                    c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (%s, %s, 0, %s) ON CONFLICT (token) DO NOTHING",
-                              (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
                 else:
                     c.execute("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
                               (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
                     new_user_id = c.lastrowid
-                    token = sign_data(f"user:{new_user_id}")
-                    c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
-                              (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
                 conn.commit()
 
+                token = sign_data(f"user:{new_user_id}")
                 cookie = http.cookies.SimpleCookie()
                 cookie['deride_session'] = token
                 cookie['deride_session']['path'] = '/'
@@ -1372,13 +1265,6 @@ class handler(http.server.BaseHTTPRequestHandler):
                 self.send_redirect(f'/?mode={mode}', cookies=cookie)
 
             elif path == '/logout':
-                cookie_header = self.headers.get('Cookie', '')
-                if cookie_header:
-                    cookie = http.cookies.SimpleCookie(cookie_header)
-                    token = cookie.get('deride_session')
-                    if token:
-                        c.execute(q("DELETE FROM sessions WHERE token = %s"), (token.value,))
-                        conn.commit()
                 res_cookie = http.cookies.SimpleCookie()
                 res_cookie['deride_session'] = ''
                 res_cookie['deride_session']['path'] = '/'
@@ -1390,13 +1276,6 @@ class handler(http.server.BaseHTTPRequestHandler):
                 admin_pass = data.get('admin_pass', [''])[0]
                 if admin_user == 'admin' and admin_pass == 'admin2026':
                     token = sign_data("admin_authenticated")
-                    if USE_POSTGRES:
-                        c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (%s, 0, 1, %s) ON CONFLICT (token) DO NOTHING",
-                                  (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
-                    else:
-                        c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, 0, 1, ?)",
-                                  (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
-                    conn.commit()
                     cookie = http.cookies.SimpleCookie()
                     cookie['deride_admin_session'] = token
                     cookie['deride_admin_session']['path'] = '/'
@@ -1406,13 +1285,6 @@ class handler(http.server.BaseHTTPRequestHandler):
                     self.send_html(render_admin_login(error_msg="管理者IDまたはパスワードが無効です"))
 
             elif path == '/admin/logout':
-                cookie_header = self.headers.get('Cookie', '')
-                if cookie_header:
-                    cookie = http.cookies.SimpleCookie(cookie_header)
-                    token = cookie.get('deride_admin_session')
-                    if token:
-                        c.execute(q("DELETE FROM sessions WHERE token = %s"), (token.value,))
-                        conn.commit()
                 res_cookie = http.cookies.SimpleCookie()
                 res_cookie['deride_admin_session'] = ''
                 res_cookie['deride_admin_session']['path'] = '/'
@@ -1483,7 +1355,6 @@ class handler(http.server.BaseHTTPRequestHandler):
                 conn.commit()
                 self.send_redirect(f"/items/{item_id}?mode={mode}")
 
-            conn.close()
         except Exception as e:
             self.send_html(f"<h1>処理エラー</h1><pre>{traceback.format_exc()}</pre><p><a href='/'>トップに戻る</a></p>")
 
