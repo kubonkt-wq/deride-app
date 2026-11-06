@@ -14,9 +14,10 @@ import secrets
 from datetime import datetime
 
 # ==========================================
-# 0. データベース接続（Vercel内 SQLite完結版）
+# 0. データベース & ステートレス認証キー
 # ==========================================
 DB_PATH = os.path.join(tempfile.gettempdir(), 'deride_platform.db')
+AUTH_SECRET = "deride-chunichi-auth-secret-key-2026"
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -25,6 +26,19 @@ def get_db():
 
 def hash_password(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+def sign_data(data_str):
+    sig = hashlib.sha256(f"{data_str}:{AUTH_SECRET}".encode('utf-8')).hexdigest()[:16]
+    return f"{data_str}.{sig}"
+
+def verify_data(signed_str):
+    if not signed_str or '.' not in signed_str:
+        return None
+    data, sig = signed_str.rsplit('.', 1)
+    expected = hashlib.sha256(f"{data}:{AUTH_SECRET}".encode('utf-8')).hexdigest()[:16]
+    if secrets.compare_digest(sig, expected):
+        return data
+    return None
 
 # ==========================================
 # 1. 店舗マスターと初期化
@@ -47,7 +61,7 @@ def load_shops_from_csv():
             try:
                 with open(target_csv, 'r', encoding=enc) as f:
                     reader = csv.reader(f)
-                    header = next(reader, None)
+                    next(reader, None)
                     for idx, row in enumerate(reader, 1):
                         if not row or len(row) < 2: continue
                         s_id = row[0].strip() if len(row) > 0 and row[0].strip().isdigit() else idx
@@ -124,15 +138,24 @@ def get_current_user(handler_obj):
     token = cookie.get('deride_session')
     if not token: return None
     
+    verified = verify_data(token.value)
+    user_id = None
+    if verified and verified.startswith('user:'):
+        user_id = verified.split(':')[1]
+    
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
-        SELECT u.id, u.shop_id, u.username, s.name as shop_name, s.pref, s.branch, s.district, s.group_name
-        FROM sessions ses
-        JOIN users u ON ses.user_id = u.id
-        JOIN shops s ON u.shop_id = s.id
-        WHERE ses.token = ?
-    """, (token.value,))
+    if user_id:
+        c.execute("""
+            SELECT u.id, u.shop_id, u.username, s.name as shop_name, s.pref, s.branch, s.district, s.group_name
+            FROM users u JOIN shops s ON u.shop_id = s.id WHERE u.id = ?
+        """, (user_id,))
+    else:
+        c.execute("""
+            SELECT u.id, u.shop_id, u.username, s.name as shop_name, s.pref, s.branch, s.district, s.group_name
+            FROM sessions ses JOIN users u ON ses.user_id = u.id JOIN shops s ON u.shop_id = s.id
+            WHERE ses.token = ?
+        """, (token.value,))
     user = c.fetchone()
     conn.close()
     return user
@@ -143,6 +166,10 @@ def is_admin_logged_in(handler_obj):
     cookie = http.cookies.SimpleCookie(cookie_header)
     token = cookie.get('deride_admin_session')
     if not token: return False
+    
+    verified = verify_data(token.value)
+    if verified == "admin_authenticated":
+        return True
     
     conn = get_db()
     c = conn.cursor()
@@ -173,7 +200,10 @@ BASE_HTML = """<!DOCTYPE html>
         <span class="bg-yellow-400 text-blue-900 text-[10px] px-1.5 py-0.5 rounded font-black">公式</span>
         <span>でらイド</span>
       </a>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1.5 md:gap-2">
+        <a href="/admin/deals" class="text-[11px] bg-slate-900/90 hover:bg-slate-950 text-amber-300 border border-slate-700 px-2 py-1.5 rounded-lg font-bold flex items-center gap-1 shadow-sm" title="本部売上管理台帳">
+          <span>⚙️</span><span class="hidden sm:inline">本部</span>
+        </a>
         <div class="bg-blue-950 p-0.5 rounded-lg border border-blue-700 flex text-xs">
           <a href="/?mode=buyer" class="px-2.5 py-1 rounded-md font-bold transition __BUYER_MODE_CLS__">🛒 購入者</a>
           <a href="/?mode=seller" class="px-2.5 py-1 rounded-md font-bold transition __SELLER_MODE_CLS__">📦 出品者</a>
@@ -284,7 +314,6 @@ def build_item_cards(items, mode="buyer"):
         """
     return items_html
 
-# --- A. ホーム画面 ---
 def render_home(mode="buyer", current_user=None):
     conn = get_db()
     c = conn.cursor()
@@ -320,7 +349,6 @@ def render_home(mode="buyer", current_user=None):
     """
     return render_page(content, active_tab="home", mode=mode, current_user=current_user)
 
-# --- B. ログイン・登録画面 ---
 def render_login(error_msg="", mode="buyer"):
     err_box = f'<div class="bg-red-50 text-red-600 p-3 rounded-xl text-xs font-bold border border-red-200 mb-4">{error_msg}</div>' if error_msg else ''
     content = f"""
@@ -337,7 +365,7 @@ def render_login(error_msg="", mode="buyer"):
         <input type="hidden" name="mode" value="{mode}">
         <div>
           <label class="block text-xs font-bold text-gray-700 mb-1">ログインID</label>
-          <input type="text" name="username" class="w-full border rounded-xl p-3 text-sm bg-gray-50 focus:bg-white" placeholder="例: sakae" required>
+          <input type="text" name="username" class="w-full border rounded-xl p-3 text-sm bg-gray-50 focus:bg-white" placeholder="例: sakae または admin" required>
         </div>
         <div>
           <label class="block text-xs font-bold text-gray-700 mb-1">パスワード</label>
@@ -352,6 +380,12 @@ def render_login(error_msg="", mode="buyer"):
         <p class="text-xs text-gray-600">まだ専売店アカウントをお持ちでない方</p>
         <a href="/register?mode={mode}" class="inline-block w-full py-3 bg-emerald-50 text-emerald-700 border border-emerald-300 font-bold rounded-xl text-xs hover:bg-emerald-100 transition">
           ＋ 新規専売店アカウントを作成（無料）
+        </a>
+      </div>
+
+      <div class="mt-4 pt-4 border-t border-dashed text-center">
+        <a href="/admin/login" class="inline-flex items-center justify-center gap-1.5 text-xs text-slate-700 font-bold hover:text-slate-950 bg-slate-100 hover:bg-slate-200 w-full py-2.5 rounded-xl border border-slate-300 transition">
+          <span>⚙️</span> 本部管理システム・売上台帳はこちら
         </a>
       </div>
     </div>
@@ -486,7 +520,6 @@ def render_register(error_msg="", mode="buyer"):
     """
     return render_page(content, active_tab="mypage", mode=mode)
 
-# --- C. 出品画面 ---
 def render_sell(edit_item_id=None, mode="seller", current_user=None):
     if not current_user:
         return render_page(f"""
@@ -683,7 +716,6 @@ def render_sell(edit_item_id=None, mode="seller", current_user=None):
     """
     return render_page(content, active_tab="sell", mode=mode, current_user=current_user)
 
-# --- D. 詳細・購入画面 ---
 def render_detail(item_id, mode="buyer", current_user=None):
     conn = get_db()
     c = conn.cursor()
@@ -859,7 +891,6 @@ def render_detail(item_id, mode="buyer", current_user=None):
     """
     return render_page(content, active_tab="home", mode=mode, current_user=current_user)
 
-# --- E. いいね画面 ---
 def render_likes(mode="buyer", current_user=None):
     conn = get_db()
     c = conn.cursor()
@@ -871,7 +902,6 @@ def render_likes(mode="buyer", current_user=None):
     content = f'<div class="mb-4"><h2 class="text-base font-bold text-gray-900 flex items-center gap-1.5"><span class="text-pink-600 text-lg">❤️</span><span>いいね！された人気商品</span><span class="text-xs font-normal text-gray-500">({len(items)}件)</span></h2></div><div class="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">{items_html}</div>'
     return render_page(content, active_tab="likes", mode=mode, current_user=current_user)
 
-# --- F. マイページ ---
 def render_mypage(mode="buyer", current_user=None):
     if not current_user:
         return render_login(mode=mode)
@@ -988,7 +1018,7 @@ def render_admin_login(error_msg=""):
     <form action="/admin/login" method="post" class="space-y-4">
       <div>
         <label class="block text-xs font-bold text-slate-300 mb-1">管理者ID</label>
-        <input type="text" name="admin_user" class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-blue-500" placeholder="admin" required>
+        <input type="text" name="admin_user" value="admin" class="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-blue-500" placeholder="admin" required>
       </div>
       <div>
         <label class="block text-xs font-bold text-slate-300 mb-1">管理者パスワード</label>
@@ -1235,11 +1265,23 @@ class handler(http.server.BaseHTTPRequestHandler):
             if path == '/login':
                 username = data.get('username', [''])[0].strip()
                 password = data.get('password', [''])[0]
+
+                # 管理者ログイン情報が入力された場合は直接本部画面へ誘導
+                if username == 'admin' and password == 'admin2026':
+                    token = sign_data("admin_authenticated")
+                    cookie = http.cookies.SimpleCookie()
+                    cookie['deride_admin_session'] = token
+                    cookie['deride_admin_session']['path'] = '/'
+                    cookie['deride_admin_session']['httponly'] = True
+                    conn.close()
+                    self.send_redirect('/admin/deals', cookies=cookie)
+                    return
+
                 c.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username, hash_password(password)))
                 user = c.fetchone()
                 if user:
-                    token = secrets.token_hex(24)
-                    c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
+                    token = sign_data(f"user:{user['id']}")
+                    c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
                               (token, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M')))
                     conn.commit()
                     cookie = http.cookies.SimpleCookie()
@@ -1267,8 +1309,8 @@ class handler(http.server.BaseHTTPRequestHandler):
                           (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
                 new_user_id = c.lastrowid
 
-                token = secrets.token_hex(24)
-                c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
+                token = sign_data(f"user:{new_user_id}")
+                c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
                           (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
                 conn.commit()
 
@@ -1296,8 +1338,8 @@ class handler(http.server.BaseHTTPRequestHandler):
                 admin_user = data.get('admin_user', [''])[0].strip()
                 admin_pass = data.get('admin_pass', [''])[0]
                 if admin_user == 'admin' and admin_pass == 'admin2026':
-                    token = secrets.token_hex(24)
-                    c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (?, 0, 1, ?)",
+                    token = sign_data("admin_authenticated")
+                    c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, 0, 1, ?)",
                               (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
                     conn.commit()
                     cookie = http.cookies.SimpleCookie()
