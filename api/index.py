@@ -14,18 +14,45 @@ import secrets
 from datetime import datetime
 
 # ==========================================
-# 0. データベース & ステートレス認証キー
+# 0. データベース & ステートレス認証設定
 # ==========================================
+DATABASE_URL = os.environ.get('DATABASE_URL')
+USE_POSTGRES = bool(DATABASE_URL)
+
+if USE_POSTGRES:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
 DB_PATH = os.path.join(tempfile.gettempdir(), 'deride_platform.db')
 AUTH_SECRET = "deride-chunichi-auth-secret-key-2026"
 
+class DBConnection:
+    def __init__(self):
+        if USE_POSTGRES:
+            self.conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        else:
+            self.conn = sqlite3.connect(DB_PATH)
+            self.conn.row_factory = sqlite3.Row
+
+    def cursor(self):
+        return self.conn.cursor()
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return DBConnection()
 
 def hash_password(password):
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+def q(sql):
+    if USE_POSTGRES:
+        return sql
+    return sql.replace('%s', '?')
 
 def sign_data(data_str):
     sig = hashlib.sha256(f"{data_str}:{AUTH_SECRET}".encode('utf-8')).hexdigest()[:16]
@@ -87,27 +114,42 @@ def load_shops_from_csv():
     return shops
 
 def init_db():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS shops (id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER, username TEXT UNIQUE, password_hash TEXT, created_at TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER, is_admin INTEGER DEFAULT 0, created_at TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER, category TEXT, title TEXT, price INTEGER, status TEXT, description TEXT, created_at TEXT, image_data TEXT, brand TEXT, item_condition TEXT, shipping_fee TEXT, shipping_method TEXT, shipping_area TEXT, shipping_days TEXT, likes_count INTEGER DEFAULT 0)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, seller_shop_id INTEGER, buyer_shop_id INTEGER, deal_price INTEGER, fee_amount INTEGER, closed_at TEXT)""")
-    c.execute("""CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, shop_id INTEGER, message TEXT, created_at TEXT)""")
-
-    c.execute("SELECT count(*) FROM shops")
-    if c.fetchone()[0] == 0:
-        shop_data = load_shops_from_csv()
-        for s in shop_data:
-            c.execute("INSERT INTO shops VALUES (?, ?, ?, ?, ?, ?)", s)
+    try:
+        conn = get_db()
+        c = conn.cursor()
         
-        first_shop_id = shop_data[0][0] if shop_data else 1
-        c.execute("INSERT OR IGNORE INTO users (shop_id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                  (first_shop_id, 'sakae', hash_password('sakae123'), datetime.now().strftime('%Y-%m-%d %H:%M')))
+        if USE_POSTGRES:
+            c.execute("""CREATE TABLE IF NOT EXISTS shops (id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, shop_id INTEGER, username TEXT UNIQUE, password_hash TEXT, created_at TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER, is_admin INTEGER DEFAULT 0, created_at TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS items (id SERIAL PRIMARY KEY, shop_id INTEGER, category TEXT, title TEXT, price INTEGER, status TEXT, description TEXT, created_at TEXT, image_data TEXT, brand TEXT, item_condition TEXT, shipping_fee TEXT, shipping_method TEXT, shipping_area TEXT, shipping_days TEXT, likes_count INTEGER DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS deals (id SERIAL PRIMARY KEY, item_id INTEGER, seller_shop_id INTEGER, buyer_shop_id INTEGER, deal_price INTEGER, fee_amount INTEGER, closed_at TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS comments (id SERIAL PRIMARY KEY, item_id INTEGER, shop_id INTEGER, message TEXT, created_at TEXT)""")
+        else:
+            c.execute("""CREATE TABLE IF NOT EXISTS shops (id INTEGER PRIMARY KEY, pref TEXT, district TEXT, branch TEXT, group_name TEXT, name TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER, username TEXT UNIQUE, password_hash TEXT, created_at TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER, is_admin INTEGER DEFAULT 0, created_at TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, shop_id INTEGER, category TEXT, title TEXT, price INTEGER, status TEXT, description TEXT, created_at TEXT, image_data TEXT, brand TEXT, item_condition TEXT, shipping_fee TEXT, shipping_method TEXT, shipping_area TEXT, shipping_days TEXT, likes_count INTEGER DEFAULT 0)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS deals (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, seller_shop_id INTEGER, buyer_shop_id INTEGER, deal_price INTEGER, fee_amount INTEGER, closed_at TEXT)""")
+            c.execute("""CREATE TABLE IF NOT EXISTS comments (id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER, shop_id INTEGER, message TEXT, created_at TEXT)""")
 
-    conn.commit()
-    conn.close()
+        c.execute("SELECT count(*) FROM shops")
+        row = c.fetchone()
+        shop_count = row['count'] if USE_POSTGRES else row[0]
+        
+        if shop_count == 0:
+            shop_data = load_shops_from_csv()
+            for s in shop_data:
+                c.execute(q("INSERT INTO shops (id, pref, district, branch, group_name, name) VALUES (%s, %s, %s, %s, %s, %s)"), s)
+            
+            first_shop_id = shop_data[0][0] if shop_data else 1
+            c.execute(q("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (%s, %s, %s, %s)"),
+                      (first_shop_id, 'sakae', hash_password('sakae123'), datetime.now().strftime('%Y-%m-%d %H:%M')))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DB初期化エラー: {e}")
 
 init_db()
 
@@ -141,21 +183,21 @@ def get_current_user(handler_obj):
     verified = verify_data(token.value)
     user_id = None
     if verified and verified.startswith('user:'):
-        user_id = verified.split(':')[1]
+        user_id = int(verified.split(':')[1])
     
     conn = get_db()
     c = conn.cursor()
     if user_id:
-        c.execute("""
+        c.execute(q("""
             SELECT u.id, u.shop_id, u.username, s.name as shop_name, s.pref, s.branch, s.district, s.group_name
-            FROM users u JOIN shops s ON u.shop_id = s.id WHERE u.id = ?
-        """, (user_id,))
+            FROM users u JOIN shops s ON u.shop_id = s.id WHERE u.id = %s
+        """), (user_id,))
     else:
-        c.execute("""
+        c.execute(q("""
             SELECT u.id, u.shop_id, u.username, s.name as shop_name, s.pref, s.branch, s.district, s.group_name
             FROM sessions ses JOIN users u ON ses.user_id = u.id JOIN shops s ON u.shop_id = s.id
-            WHERE ses.token = ?
-        """, (token.value,))
+            WHERE ses.token = %s
+        """), (token.value,))
     user = c.fetchone()
     conn.close()
     return user
@@ -173,7 +215,7 @@ def is_admin_logged_in(handler_obj):
     
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT is_admin FROM sessions WHERE token = ? AND is_admin = 1", (token.value,))
+    c.execute(q("SELECT is_admin FROM sessions WHERE token = %s AND is_admin = 1"), (token.value,))
     admin = c.fetchone()
     conn.close()
     return admin is not None
@@ -535,7 +577,7 @@ def render_sell(edit_item_id=None, mode="seller", current_user=None):
     c = conn.cursor()
     item_to_edit = None
     if edit_item_id:
-        c.execute("SELECT * FROM items WHERE id=?", (edit_item_id,))
+        c.execute(q("SELECT * FROM items WHERE id=%s"), (edit_item_id,))
         item_to_edit = c.fetchone()
     conn.close()
 
@@ -719,14 +761,14 @@ def render_sell(edit_item_id=None, mode="seller", current_user=None):
 def render_detail(item_id, mode="buyer", current_user=None):
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
+    c.execute(q("""
         SELECT i.*, s.name, s.pref, s.branch, s.district, s.group_name
         FROM items i JOIN shops s ON i.shop_id = s.id 
-        WHERE i.id=?
-    """, (item_id,))
+        WHERE i.id=%s
+    """), (item_id,))
     item = c.fetchone()
     
-    c.execute("SELECT comments.message, comments.created_at, shops.name FROM comments JOIN shops ON comments.shop_id = shops.id WHERE comments.item_id=? ORDER BY comments.id ASC", (item_id,))
+    c.execute(q("SELECT comments.message, comments.created_at, shops.name FROM comments JOIN shops ON comments.shop_id = shops.id WHERE comments.item_id=%s ORDER BY comments.id ASC"), (item_id,))
     comments = c.fetchall()
     conn.close()
 
@@ -910,11 +952,11 @@ def render_mypage(mode="buyer", current_user=None):
     c = conn.cursor()
     shop_id = current_user['shop_id']
 
-    c.execute("""
+    c.execute(q("""
         SELECT d.id, d.closed_at, i.title, b.name, d.deal_price, d.fee_amount, i.id as item_id
         FROM deals d JOIN items i ON d.item_id = i.id JOIN shops b ON d.buyer_shop_id = b.id
-        WHERE d.seller_shop_id = ? ORDER BY d.closed_at DESC
-    """, (shop_id,))
+        WHERE d.seller_shop_id = %s ORDER BY d.closed_at DESC
+    """), (shop_id,))
     sell_deals = c.fetchall()
 
     sell_deals_html = ""
@@ -937,11 +979,11 @@ def render_mypage(mode="buyer", current_user=None):
         </div>
         """
 
-    c.execute("""
+    c.execute(q("""
         SELECT d.id, d.closed_at, i.title, s.name, d.deal_price, i.id as item_id
         FROM deals d JOIN items i ON d.item_id = i.id JOIN shops s ON d.seller_shop_id = s.id
-        WHERE d.buyer_shop_id = ? ORDER BY d.closed_at DESC
-    """, (shop_id,))
+        WHERE d.buyer_shop_id = %s ORDER BY d.closed_at DESC
+    """), (shop_id,))
     buy_deals = c.fetchall()
 
     buy_deals_html = ""
@@ -992,9 +1034,6 @@ def render_mypage(mode="buyer", current_user=None):
     """
     return render_page(content, active_tab="mypage", mode=mode, current_user=current_user)
 
-# ==========================================
-# 5. 管理者専用画面
-# ==========================================
 def render_admin_login(error_msg=""):
     err_box = f'<div class="bg-red-50 text-red-600 p-3 rounded-lg text-xs font-bold border border-red-200 mb-4">{error_msg}</div>' if error_msg else ''
     return f"""<!DOCTYPE html>
@@ -1266,7 +1305,7 @@ class handler(http.server.BaseHTTPRequestHandler):
                 username = data.get('username', [''])[0].strip()
                 password = data.get('password', [''])[0]
 
-                # 管理者ログイン情報が入力された場合は直接本部画面へ誘導
+                # 管理者ログイン判定
                 if username == 'admin' and password == 'admin2026':
                     token = sign_data("admin_authenticated")
                     cookie = http.cookies.SimpleCookie()
@@ -1277,10 +1316,12 @@ class handler(http.server.BaseHTTPRequestHandler):
                     self.send_redirect('/admin/deals', cookies=cookie)
                     return
 
-                c.execute("SELECT id FROM users WHERE username = ? AND password_hash = ?", (username, hash_password(password)))
+                c.execute(q("SELECT id FROM users WHERE username = %s AND password_hash = %s"), (username, hash_password(password)))
                 user = c.fetchone()
                 if user:
                     token = sign_data(f"user:{user['id']}")
+                    c.execute(q("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (%s, %s, 0, %s) ON CONFLICT (token) DO NOTHING"),
+                              (token, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M'))) if USE_POSTGRES else \
                     c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
                               (token, user['id'], datetime.now().strftime('%Y-%m-%d %H:%M')))
                     conn.commit()
@@ -1300,18 +1341,25 @@ class handler(http.server.BaseHTTPRequestHandler):
                     self.send_html(render_register(error_msg="店舗を選択し、パスワードは4文字以上で入力してください", mode=mode))
                     return
 
-                c.execute("SELECT id FROM users WHERE username = ?", (username,))
+                c.execute(q("SELECT id FROM users WHERE username = %s"), (username,))
                 if c.fetchone():
                     self.send_html(render_register(error_msg="そのログインIDはすでに登録されています", mode=mode))
                     return
 
-                c.execute("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                          (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
-                new_user_id = c.lastrowid
-
-                token = sign_data(f"user:{new_user_id}")
-                c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
-                          (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                if USE_POSTGRES:
+                    c.execute("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (%s, %s, %s, %s) RETURNING id",
+                              (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
+                    new_user_id = c.fetchone()['id']
+                    token = sign_data(f"user:{new_user_id}")
+                    c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (%s, %s, 0, %s) ON CONFLICT (token) DO NOTHING",
+                              (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                else:
+                    c.execute("INSERT INTO users (shop_id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                              (shop_id, username, hash_password(password), datetime.now().strftime('%Y-%m-%d %H:%M')))
+                    new_user_id = c.lastrowid
+                    token = sign_data(f"user:{new_user_id}")
+                    c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, ?, 0, ?)",
+                              (token, new_user_id, datetime.now().strftime('%Y-%m-%d %H:%M')))
                 conn.commit()
 
                 cookie = http.cookies.SimpleCookie()
@@ -1326,7 +1374,7 @@ class handler(http.server.BaseHTTPRequestHandler):
                     cookie = http.cookies.SimpleCookie(cookie_header)
                     token = cookie.get('deride_session')
                     if token:
-                        c.execute("DELETE FROM sessions WHERE token = ?", (token.value,))
+                        c.execute(q("DELETE FROM sessions WHERE token = %s"), (token.value,))
                         conn.commit()
                 res_cookie = http.cookies.SimpleCookie()
                 res_cookie['deride_session'] = ''
@@ -1339,8 +1387,12 @@ class handler(http.server.BaseHTTPRequestHandler):
                 admin_pass = data.get('admin_pass', [''])[0]
                 if admin_user == 'admin' and admin_pass == 'admin2026':
                     token = sign_data("admin_authenticated")
-                    c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, 0, 1, ?)",
-                              (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                    if USE_POSTGRES:
+                        c.execute("INSERT INTO sessions (token, user_id, is_admin, created_at) VALUES (%s, 0, 1, %s) ON CONFLICT (token) DO NOTHING",
+                                  (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
+                    else:
+                        c.execute("INSERT OR REPLACE INTO sessions (token, user_id, is_admin, created_at) VALUES (?, 0, 1, ?)",
+                                  (token, datetime.now().strftime('%Y-%m-%d %H:%M')))
                     conn.commit()
                     cookie = http.cookies.SimpleCookie()
                     cookie['deride_admin_session'] = token
@@ -1356,7 +1408,7 @@ class handler(http.server.BaseHTTPRequestHandler):
                     cookie = http.cookies.SimpleCookie(cookie_header)
                     token = cookie.get('deride_admin_session')
                     if token:
-                        c.execute("DELETE FROM sessions WHERE token = ?", (token.value,))
+                        c.execute(q("DELETE FROM sessions WHERE token = %s"), (token.value,))
                         conn.commit()
                 res_cookie = http.cookies.SimpleCookie()
                 res_cookie['deride_admin_session'] = ''
@@ -1365,12 +1417,12 @@ class handler(http.server.BaseHTTPRequestHandler):
                 self.send_redirect('/admin/login', cookies=res_cookie)
 
             elif path == '/items/create':
-                c.execute("""
+                c.execute(q("""
                     INSERT INTO items (
                         shop_id, category, title, price, description, status, created_at, image_data,
                         brand, item_condition, shipping_fee, shipping_method, shipping_area, shipping_days, likes_count
-                    ) VALUES (?, ?, ?, ?, ?, '出品中', ?, ?, ?, '未使用に近い', '送料込み', '直接引き取り', '愛知県', '1〜2日で発送', 0)
-                """, (
+                    ) VALUES (%s, %s, %s, %s, %s, '出品中', %s, %s, %s, '未使用に近い', '送料込み', '直接引き取り', '愛知県', '1〜2日で発送', 0)
+                """), (
                     data.get('shop_id', ['1'])[0], 
                     data.get('category', ['バイク'])[0], 
                     data.get('title', ['無題'])[0], 
@@ -1387,31 +1439,31 @@ class handler(http.server.BaseHTTPRequestHandler):
                 item_id = data.get('item_id', [''])[0]
                 img_json = data.get('image_data_json', [''])[0]
                 if img_json:
-                    c.execute("UPDATE items SET category=?, title=?, price=?, description=?, brand=?, image_data=? WHERE id=?",
+                    c.execute(q("UPDATE items SET category=%s, title=%s, price=%s, description=%s, brand=%s, image_data=%s WHERE id=%s"),
                               (data.get('category', ['バイク'])[0], data.get('title', [''])[0], int(data.get('price', ['0'])[0] or 0), data.get('description', [''])[0], data.get('brand', ['ホンダ'])[0], img_json, item_id))
                 else:
-                    c.execute("UPDATE items SET category=?, title=?, price=?, description=?, brand=? WHERE id=?",
+                    c.execute(q("UPDATE items SET category=%s, title=%s, price=%s, description=%s, brand=%s WHERE id=%s"),
                               (data.get('category', ['バイク'])[0], data.get('title', [''])[0], int(data.get('price', ['0'])[0] or 0), data.get('description', [''])[0], data.get('brand', ['ホンダ'])[0], item_id))
                 conn.commit()
                 self.send_redirect(f"/items/{item_id}?mode={mode}")
 
             elif path == '/items/like':
                 item_id = data.get('item_id', [''])[0]
-                c.execute("UPDATE items SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = ?", (item_id,))
+                c.execute(q("UPDATE items SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = %s"), (item_id,))
                 conn.commit()
                 self.send_redirect(f"/items/{item_id}?mode={mode}")
 
             elif path == '/items/delete':
                 item_id = data.get('item_id', [''])[0]
-                c.execute("DELETE FROM items WHERE id = ?", (item_id,))
-                c.execute("DELETE FROM comments WHERE id = ?", (item_id,))
+                c.execute(q("DELETE FROM items WHERE id = %s"), (item_id,))
+                c.execute(q("DELETE FROM comments WHERE id = %s"), (item_id,))
                 conn.commit()
                 self.send_redirect(f'/?mode={mode}')
 
             elif path == '/comments/create':
                 item_id = data.get('item_id', [''])[0]
                 shop_id = data.get('shop_id', ['1'])[0]
-                c.execute("INSERT INTO comments (item_id, shop_id, message, created_at) VALUES (?, ?, ?, ?)",
+                c.execute(q("INSERT INTO comments (item_id, shop_id, message, created_at) VALUES (%s, %s, %s, %s)"),
                           (item_id, shop_id, data.get('message', [''])[0], datetime.now().strftime('%Y-%m-%d %H:%M')))
                 conn.commit()
                 self.send_redirect(f"/items/{item_id}?mode={mode}")
@@ -1422,9 +1474,9 @@ class handler(http.server.BaseHTTPRequestHandler):
                 buyer_shop_id = data.get('buyer_shop_id', ['2'])[0]
                 price = int(data.get('price', ['0'])[0] or 0)
                 fee_10pct = int(price * 0.10)
-                c.execute("INSERT INTO deals (item_id, seller_shop_id, buyer_shop_id, deal_price, fee_amount, closed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                c.execute(q("INSERT INTO deals (item_id, seller_shop_id, buyer_shop_id, deal_price, fee_amount, closed_at) VALUES (%s, %s, %s, %s, %s, %s)"),
                           (item_id, seller_shop_id, buyer_shop_id, price, fee_10pct, datetime.now().strftime('%Y-%m-%d %H:%M')))
-                c.execute("UPDATE items SET status = '成約済み' WHERE id = ?", (item_id,))
+                c.execute(q("UPDATE items SET status = '成約済み' WHERE id = %s"), (item_id,))
                 conn.commit()
                 self.send_redirect(f"/items/{item_id}?mode={mode}")
 
